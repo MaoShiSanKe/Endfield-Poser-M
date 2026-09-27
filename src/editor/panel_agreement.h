@@ -3,7 +3,7 @@
 // 首次启动的「用户协议」弹窗（v0.3.6 起）。
 //
 // 行为：
-//   - 没同意之前，插件不安装任何游戏侧 hook、不触碰游戏对象
+//   - 没同意之前，插件不启用编辑或播放功能
 //     （见 poser.cpp 的 InitThread 与 GameFrameTick 里的闸门）；
 //   - 条款必须滚到底，「同意并继续」才可点；
 //   - 同意后把 terms_version=<当前版本> 写进 plugin\poser_config.txt，之后不再打扰；
@@ -157,4 +157,28 @@ static int DrawAgreementDialog(const char *toggleHotkey, bool reviewMode) {
 
   ImGui::End();
   return result;
+}
+
+static bool g_showUserAgreement = false;
+static bool DrawUserAgreement() {
+  const bool required = !poser_agreement::Allowed();
+  if (!required && !g_showUserAgreement) return false;
+  char hotkey[48] = {};
+  HotkeyDisplay(g_guiToggleVK, g_guiToggleCtrl, hotkey, sizeof(hotkey));
+  const int result = DrawAgreementDialog(hotkey, !required);
+  if (result == 1 && required) {
+    char version[16] = {};
+    snprintf(version, sizeof(version), "%d", POSER_TERMS_VERSION);
+    if (SaveConfigValue("terms_version", version)) {
+      g_termsAcceptedVersion = POSER_TERMS_VERSION;
+      poser_agreement::accepted.store(true);
+      InterlockedExchange(&g_hotkeyFreezeReq, 0);
+      InterlockedExchange(&g_mmdHotkeyRequests, 0);
+      InterlockedExchange(&g_leftClickReq, 0);
+    }
+  } else if (result != 0) {
+    g_showUserAgreement = false;
+    if (required) g_guiVisible = false;
+  }
+  return true;
 }

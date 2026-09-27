@@ -10,7 +10,9 @@ Endfield Poser —— 第三方来源与许可声明
    本项目 `src/core/` 下的若干文件（`base.h`、`il2cpp_api.h`、`proxy_d3dcompiler.cpp`、
    `proxy_vulkan_full.cpp`、`gui_overlay.h`、`game_hooks.h`）由该项目的实现精简 / 改写而来；
    `src/` 中的 `AP_*` 导出沿用该项目的协议定义；`README.md` 的《用户协议与免责声明》
-   章节结构与措辞参考了该项目的 README。其余文件为本项目独立实现。
+   章节结构与措辞参考了该项目的 README。`src/game/cloth.h`、`cloth_anchor.h`、`smc_morph.h` 与冻结相关代码亦包含该项目的改写。
+   MMD 播放与生命周期修复移植自 OedoSoldier/Endfield-Poser（AGPL-3.0）；
+   保留各源码文件中的来源注释。
 
    **署名只为满足开源许可，不表示任何其他关系**：
      - 上游项目与本项目是相互独立的项目，其作者未参与本项目，也未对本项目作出任何认可或背书；

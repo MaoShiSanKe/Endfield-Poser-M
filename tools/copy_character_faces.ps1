@@ -1,4 +1,4 @@
-param([Parameter(Mandatory = $true)][string]$Destination)
+﻿param([Parameter(Mandatory = $true)][string]$Destination)
 $ErrorActionPreference = 'Stop'
 $source = Join-Path (Split-Path $PSScriptRoot -Parent) 'resources\character-faces'
 $profiles = @(Get-ChildItem -LiteralPath $source -File -Filter '*.face.json')

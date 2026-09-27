@@ -13,6 +13,7 @@
 
 #include "nlohmann/json.hpp"
 #include "config.h"
+#include "user_agreement.h"
 #include "game/skeleton.h"
 #include "game/freeze.h"
 #include "math/pose_file.h"
@@ -20,7 +21,7 @@
 #include "editor/panel_library.h"
 
 static int g_webPort = 18923;
-static volatile bool g_webRunning = false;
+static std::atomic<bool> g_webRunning = false;
 
 // ---- 简易 HTTP 响应 ----
 static void HttpReply(SOCKET c, const char *ctype, const std::string &body) {
@@ -35,7 +36,7 @@ static void HttpReply(SOCKET c, const char *ctype, const std::string &body) {
 }
 
 static void HttpJson(SOCKET c, const nlohmann::json &j) {
-  HttpReply(c, "application/json", j.dump());
+  HttpReply(c, "application/json; charset=utf-8", j.dump());
 }
 
 // ---- API：骨骼列表 ----
@@ -69,6 +70,21 @@ static nlohmann::json ApiBones() {
 // ---- 处理一个请求 ----
 static void HandleRequestBody(SOCKET c, const std::string &path,
                           const std::string &body) {
+  std::lock_guard<std::recursive_mutex> lock(g_poseMutex);
+  if (!poser_agreement::Allowed() && path != "/api/status") {
+    const std::string payload = nlohmann::json({{"ok", false}, {"err", "agreement_required"},
+      {"message", u8"请在游戏内打开 Poser 面板，阅读并确认用户协议后使用插件。"}}).dump();
+    char head[256];
+    int n = snprintf(head, sizeof(head), "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", payload.size());
+    send(c, head, n, 0); send(c, payload.data(), (int)payload.size(), 0); return;
+  }
+  const bool readOnly = path=="/" || path=="/index.html" || path=="/api/status" || path=="/api/mmd/status" || path=="/api/bones" || path=="/api/allbones" || path=="/api/face" || (path=="/api/pose" && body.empty());
+  if(MmdOwnsPose() && !readOnly) {
+    const char* payload="{\"ok\":false,\"err\":\"MMD playback owns the pose; stop playback before editing\"}";
+    char head[256];int n=snprintf(head,sizeof(head),"HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",strlen(payload));
+    send(c,head,n,0);send(c,payload,(int)strlen(payload),0);return;
+  }
+
   if (path == "/" || path == "/index.html") {
     // 内嵌网页：画布骨骼小人 + 滑条 + 按钮
     extern const char *g_poserHtml;
@@ -77,6 +93,8 @@ static void HandleRequestBody(SOCKET c, const std::string &path,
   }
   if (path == "/api/status") {
     HttpJson(c, {{"ok", true}, {"frozen", g_frozen},
+                 {"agreement_required", !poser_agreement::Allowed()},
+                 {"agreement_revision", poser_agreement::kRevision},
                  {"bones", s_humanBoneCount},
                  {"bones_rev", s_bonesRev},
                  {"selected", g_selectedBone},
@@ -86,6 +104,78 @@ static void HandleRequestBody(SOCKET c, const std::string &path,
   if (path == "/api/bones") {
     HttpJson(c, {{"ok", true}, {"bones", ApiBones()}});
     return;
+  }
+  if (path == "/api/mmd/status") {
+    auto &m=g_mmd;
+    nlohmann::json clothDetails=nlohmann::json::array();
+    for(int n=0;n<s_cloth.count;++n) {
+      const auto &i=s_cloth.instances[n];
+      clothDetails.push_back({{"name",i.name},{"phase",int(i.startup.phase)},
+        {"status",i.startup.reason},{"weight",i.last.weight},{"animation_pose_ratio",i.last.ratio},
+        {"running",i.last.state.running},{"active",i.last.state.active},
+        {"culled",i.last.state.culled},{"skirt",i.skirt}});
+    }
+    HttpJson(c, {{"active",MmdOwnsPose()},{"loading",m.loading},{"preview",m.preview},
+      {"state",int(m.timeline.state)},{"frame",m.timeline.seconds*30.},
+      {"last_frame",m.timeline.duration*30},{"speed",m.timeline.speed},{"loop",m.timeline.loop},
+      {"camera_keys",MmdCameraKeys().size()},{"camera_file",m.cameraFile},
+      {"camera_enabled",m.cameraSettings.enabled},{"camera_origin",int(m.cameraSettings.origin)},
+      {"camera_offset",{m.cameraSettings.offset.x,m.cameraSettings.offset.y,m.cameraSettings.offset.z}},
+      {"camera_ready",mmd_camera::ready},{"camera_status",mmd_camera::status},
+      {"camera_callback_age",mmd_camera::lastCallback < 0 ? -1.0 : MmdNow()-mmd_camera::lastCallback},
+      {"camera_applied",mmd_camera::applied},{"camera_restore_pending",!mmd_camera::request.active&&mmd_camera::lease.camera!=nullptr},
+      {"in_place",m.inPlace},{"scale",m.scale},{"status",m.status},
+      {"cloth_mode","native"},{"cloth_requested",s_clothRequested},
+      {"cloth_active",s_cloth.active},{"cloth_failed",s_cloth.failed},
+      {"cloth_restore_pending",s_cloth.releasing || (!s_clothRequested && s_cloth.active)},
+      {"cloth_hip_radius",s_skirtHipRadiusDelta.load()},{"cloth_details",clothDetails},
+      {"freeze_cloth",m.freezeCloth},
+      {"calibration",m.calibrationStatus},
+      {"character_ready",MmdCharacterReady()},
+      {"source_rig",m.rig.name},{"source_preset",m.sourcePreset},
+        {"ik_mode",int(m.ikMode)},{"pmx_reference",m.reference},
+        {"motion_amplitude",mmd::AmplitudeJson(m.amplitude)},
+      {"leg_ik_left",m.session.active && !m.preview && m.mapper.output.legIkActive[0]},
+      {"leg_ik_right",m.session.active && !m.preview && m.mapper.output.legIkActive[1]},
+      {"rig_bones",m.rig.bones.size()},
+      {"adaptation",mmd::AdaptationJson(m.adaptation,m.sourcePreset,m.ikMode)},
+      {"adaptation_file",m.adaptationFile},
+      {"music_file",m.musicFile},{"music_enabled",m.musicEnabled},
+      {"music_playing",m.audio.running()},{"music_offset",m.musicOffset},
+      {"music_volume",m.musicVolume},{"music_error",m.musicError},
+      {"music_duration",m.audio.clip() ? m.audio.clip()->duration() : 0},
+      {"game_frame_sync",g_frameDiagnostics.gameDriven},
+      {"frame_source",g_frameDiagnostics.source},
+      {"game_thread",g_frameGameThreadId.load()},{"play_pending",s_mmdStartRequest.active},
+      {"update_hz",g_frameDiagnostics.hz},{"max_gap_ms",g_frameDiagnostics.maxGapMs},
+      {"max_update_ms",g_frameDiagnostics.maxCostMs},{"busy_skips",g_frameDiagnostics.busy},
+      {"calibrated",m.profileAnimator == g_charAnimator &&
+                       m.profileRevision == s_bonesRev && m.profile.valid()},
+      {"model",CurrentCharModelKey()},{"file",m.file},{"report",m.report},
+      {"hidden_props",m.session.active ? m.session.props.size() : 0},
+      {"smc_ready",SMCSectionReady()},{"bone_tracks",m.clip.bones.size()},
+      {"native_face_paused",s_smcAutomation.confirmed},
+      {"face_mode","character"},{"face_fallback",m.faceSettings.fallback},
+      {"face_strength",m.faceSettings.strength},{"face_regions",face_mixing::Write(m.faceSettings)["regions"]},
+      {"face_profile",m.characterFace?m.characterFace->key:""},
+      {"face_profile_ready",s_characterBinding.ready},{"face_profile_matched",s_characterBinding.matched},
+      {"face_profile_usable",s_characterBinding.usableCount},{"face_profile_error",s_characterBinding.error},
+      {"face_library_count",m.faceLibrary.size()},{"face_library_loading",m.faceLibraryLoading},
+      {"face_library_error",m.faceLibraryError},
+      {"morph_tracks",m.clip.morphs.size()}});
+    return;
+  }
+  if(path=="/api/face") {
+    nlohmann::json bones=nlohmann::json::array(),missing=nlohmann::json::array();
+    for(int i=0;i<int(s_faceNodes.size());++i) {
+      const auto &b=s_faceNodes[i];auto v=b.neutral.position();
+      bones.push_back({{"name",b.name},{"parent",b.parent},{"position",{v.x,v.y,v.z}},
+        {"region",s_faceRegions[i]},{"matrix",b.neutral.m}});
+    }
+    if(s_characterProfile)for(int i=0;i<int(s_characterBinding.slots.size());++i)
+      if(s_characterBinding.slots[i]<0)missing.push_back(s_characterProfile->bones[i].name);
+    HttpJson(c,{{"model",CurrentCharModelKey()},{"generation",s_faceGeneration},{"ready",s_characterBinding.ready},
+      {"status",s_characterBinding.status},{"bones",bones},{"missing",missing}});return;
   }
   if (path == "/api/allbones") {
     // 全骨骼（含手指/配饰等），供 Blender 桥接构建完整 Armature
@@ -397,11 +487,17 @@ static void HandleRequestBody(SOCKET c, const std::string &path,
   HttpJson(c, {{"ok", false}, {"err", "unknown api"}});
 }
 
-static void HandleRequest(SOCKET c, const std::string &path, const std::string &body) {
+static void HandleAttachedRequest(SOCKET c, const std::string &path, const std::string &body) {
+  // Do not remain registered with IL2CPP while waiting on a socket or the pose
+  // lock. Runtime abort APCs previously escaped from Winsock select on this thread.
   std::lock_guard<std::recursive_mutex> lock(g_poseMutex);
-  HandleRequestBody(c,path,body);
+  RuntimeThreadScope runtime;
+  if (!runtime.ready) {
+    HttpJson(c, {{"ok", false}, {"err", "Game runtime is unavailable"}});
+    return;
+  }
+  HandleRequestBody(c, path, body);
 }
-
 static void HandleClient(SOCKET c) {
   try {
     char buf[8192];
@@ -425,7 +521,7 @@ static void HandleClient(SOCKET c) {
       body = req.substr(hb + 4);
     if (path.empty())
       path = "/";
-    HandleRequest(c, path, body);
+    HandleAttachedRequest(c, path, body);
   } catch (...) {
     Log("[WEB] C++ exception in handler");
   }
@@ -435,14 +531,7 @@ static void HandleClient(SOCKET c) {
 static DWORD WINAPI WebServerThread(LPVOID) {
   WSADATA wsa;
   WSAStartup(MAKEWORD(2, 2), &wsa);
-  // 附加到 IL2CPP 域：本线程会调游戏对象（冻结/骨骼读写），不附加会触发运行时终止
-  if (il2cpp_domain_get && il2cpp_thread_attach) {
-    void *domain = il2cpp_domain_get();
-    if (domain) {
-      il2cpp_thread_attach(domain);
-      Log("[WEB] attached to IL2CPP domain");
-    }
-  }
+  // Attach only for HandleAttachedRequest, never during network waits.
   SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (s == INVALID_SOCKET) {
     Log("[WEB] socket failed");
@@ -461,8 +550,8 @@ static DWORD WINAPI WebServerThread(LPVOID) {
   }
   listen(s, 8);
   Log("[WEB] UI server: http://127.0.0.1:%d", g_webPort);
-  g_webRunning = true;
-  while (g_webRunning) {
+  g_webRunning = !RuntimeClosing();
+  while (g_webRunning && !RuntimeClosing()) {
     // 非阻塞 accept：500ms 超时轮询，g_webRunning 置假后可干净退出
     fd_set rfds;
     FD_ZERO(&rfds);
@@ -474,6 +563,9 @@ static DWORD WINAPI WebServerThread(LPVOID) {
     SOCKET c = accept(s, nullptr, nullptr);
     if (c == INVALID_SOCKET)
       break;
+    DWORD timeoutMs = 3000;
+    setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&timeoutMs), sizeof(timeoutMs));
+    setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&timeoutMs), sizeof(timeoutMs));
     // 简单串行处理（够用）
     HandleClient(c);
   }
@@ -483,7 +575,7 @@ static DWORD WINAPI WebServerThread(LPVOID) {
 }
 
 static void StartWebServer() {
-  if (g_webRunning)
+  if (RuntimeClosing() || g_webRunning)
     return;
   CreateThread(nullptr, 0, WebServerThread, nullptr, 0, nullptr);
 }

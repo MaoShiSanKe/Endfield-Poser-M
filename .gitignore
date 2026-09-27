@@ -22,3 +22,6 @@ docs/arp-ikfk-study.md
 docs/blender-bridge.md
 docs/superpowers/
 internal-docs/
+
+# Local regression fixtures and diagnostics are not release content.
+/tests/

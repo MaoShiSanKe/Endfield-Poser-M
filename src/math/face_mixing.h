@@ -58,7 +58,7 @@ struct Hierarchy {
   Pose rest;
   std::array<int,face_geometry::MaxBones> parent{},region{},order{};
   std::array<Vec3,face_geometry::MaxBones> scale{};
-  std::array<face_math::Matrix,face_geometry::MaxBones> external{};
+  std::array<mmd::Matrix,face_geometry::MaxBones> external{};
   std::array<Quat,face_geometry::MaxBones> externalRotation{};
 };
 inline Hierarchy BindHierarchy(const std::vector<face_geometry::Bone> &nodes,
@@ -69,9 +69,9 @@ inline Hierarchy BindHierarchy(const std::vector<face_geometry::Bone> &nodes,
   for(int i=0;i<h.count;++i) {
     h.parent[i]=nodes[i].parent;h.region[i]=BoneRegion(nodes[i].name);
     h.scale[i]=scales[i];h.external[i]=nodes[i].parentNeutral;
-    h.externalRotation[i]=face_math::Rotation(nodes[i].parentNeutral);
-    face_math::Matrix inverse;
-    if(!face_math::Inverse(nodes[i].parentNeutral,inverse)||
+    h.externalRotation[i]=mmd::Rotation(nodes[i].parentNeutral);
+    mmd::Matrix inverse;
+    if(!mmd::Inverse(nodes[i].parentNeutral,inverse)||
        !std::isfinite(Len(scales[i]))||std::fabs(scales[i].x)<1e-6f||
        std::fabs(scales[i].y)<1e-6f||std::fabs(scales[i].z)<1e-6f)return h;
   }
@@ -90,12 +90,12 @@ inline Hierarchy BindHierarchy(const std::vector<face_geometry::Bone> &nodes,
 }
 inline Pose Globals(const Hierarchy &h,const Pose &local) {
   Pose result;
-  std::array<face_math::Matrix,face_geometry::MaxBones> matrices;
+  std::array<mmd::Matrix,face_geometry::MaxBones> matrices;
   for(int n=0;n<h.count;++n) {
     int i=h.order[n],p=h.parent[i];
     const auto &parent=p>=0?matrices[p]:h.external[i];
     auto parentRotation=p>=0?result[p].rotation:h.externalRotation[i];
-    matrices[i]=parent*face_math::TRS(local[i].position,local[i].rotation,h.scale[i]);
+    matrices[i]=parent*mmd::TRS(local[i].position,local[i].rotation,h.scale[i]);
     result[i]={matrices[i].position(),NormQ(parentRotation*local[i].rotation)};
   }
   return result;
@@ -109,20 +109,20 @@ inline bool Compose(const Hierarchy &h,const std::array<Pose,RegionCount> &compl
     for(int i=0;i<h.count;++i)if(h.region[i]==r)desired[i]=whole[i];
   }
   Pose result;
-  std::array<face_math::Matrix,face_geometry::MaxBones> actual,inverses;
+  std::array<mmd::Matrix,face_geometry::MaxBones> actual,inverses;
   std::array<Quat,face_geometry::MaxBones> rotations;
   for(int n=0;n<h.count;++n) {
     int i=h.order[n],p=h.parent[i];
     const auto &parent=p>=0?actual[p]:h.external[i];
-    face_math::Matrix inverse;
+    mmd::Matrix inverse;
     if(p>=0)inverse=inverses[p];
-    else if(!face_math::Inverse(parent,inverse))return false;
+    else if(!mmd::Inverse(parent,inverse))return false;
     auto parentRotation=p>=0?rotations[p]:h.externalRotation[i];
     result[i].position=face_geometry::Vector(inverse,desired[i].position)+inverse.position();
     result[i].rotation=NormQ(Conj(parentRotation)*desired[i].rotation);
-    actual[i]=parent*face_math::TRS(result[i].position,result[i].rotation,h.scale[i]);
+    actual[i]=parent*mmd::TRS(result[i].position,result[i].rotation,h.scale[i]);
     rotations[i]=NormQ(parentRotation*result[i].rotation);
-    if(!face_math::Inverse(actual[i],inverses[i]))return false;
+    if(!mmd::Inverse(actual[i],inverses[i]))return false;
   }
   output=result;return true;
 }

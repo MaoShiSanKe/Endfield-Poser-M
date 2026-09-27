@@ -1,5 +1,4 @@
 #pragma once
-#include "core/pose_lock.h"
 
 // Task 2.1：捕获主角色 Animator/Entity。
 // 通过 MinHook 挂 PlayerController.SetMainCharacter，在角色切换时提取 Entity →
@@ -12,6 +11,7 @@
 #include "base.h"
 #include "il2cpp_api.h"
 #include "math/quat_math.h"
+#include "math/edit_selection.h"
 
 #include <cstdint>
 #include <cstring>
@@ -71,12 +71,43 @@ static void *g_playerController = nullptr;
 static void *g_pcClass = nullptr; // PlayerController 类（实例补捞用）
 static void *g_mainCharEntity = nullptr;
 static void *g_charAnimator = nullptr;
-static void *g_charAnimComp = nullptr; // Entity 上的 ComplexAnimationComponent（冻结时一并禁用）
+static void *g_charAnimComp = nullptr; // Entity animation record; only toggle if verified as Behaviour.
 static void *g_animatorClass = nullptr; // UnityEngine.Animator 类（角色捕获字段扫描用）
 static volatile bool g_charChanged = false; // hook 捕获新角色后置真，GUI 消费后复位
 // 冻结状态：由 freeze.h 维护；低层模块（如 smc_morph.h 的每帧写回）只读它做闸门，
 // 避免解冻后仍然覆盖游戏的动画/表情写入。
 static bool g_frozen = false;
+static volatile LONG g_characterSwitchDepth = 0;
+// Observed on the game's character-selection callback, never on our workers.
+static volatile LONG g_gameLogicThreadId = 0;
+static bool CharacterSwitchInProgress() {
+  return InterlockedCompareExchange(&g_characterSwitchDepth, 0, 0) != 0;
+}
+// Shared ownership flag: web edits must not race the MMD playback writer.
+static volatile LONG g_mmdOwnsPose = 0;
+static bool MmdOwnsPose() { return InterlockedCompareExchange(&g_mmdOwnsPose, 0, 0) != 0; }
+static void (*g_beforeCharacterChange)() = nullptr;
+static SRWLOCK g_pendingCharacterLock = SRWLOCK_INIT;
+static void *g_pendingController = nullptr;
+static void *g_pendingEntity = nullptr;
+static std::atomic<bool> g_pendingSelection{false};
+static bool CharacterSelectionPending() { return g_pendingSelection.load(); }
+static poser::EditSelection g_editSelection;
+static bool g_preserveGripOnHandoff = false;
+static void *g_captureEntity = nullptr; // Keep retrying while the model loads.
+static bool UnityObjAlive(void *obj);
+static void *SafeGetComponentTransform(void *component);
+static void ConsumeCapturedCharacter();
+// The game hook only publishes selection. All pose/session changes stay on the
+// serialized logic thread, after SetMainCharacter has finished initializing it.
+static void QueueCharacterSelection(void *controller, void *entity) {
+  AcquireSRWLockExclusive(&g_pendingCharacterLock);
+  g_pendingController = controller;
+  g_pendingEntity = entity;
+  g_pendingSelection = true;
+  ReleaseSRWLockExclusive(&g_pendingCharacterLock);
+}
+
 
 // 已解析的运行时方法指针（对应 {EIEM} globals.h 的 g_animator_*/g_transform_*）
 static void *g_animator_GetBoneTransform = nullptr;
@@ -86,9 +117,8 @@ static void *g_animator_set_enabled = nullptr; // 来自 Behaviour.set_enabled
 static void *g_transform_get_localRotation = nullptr;
 static void *g_transform_set_localRotation = nullptr;
 static void *g_transform_get_localPosition = nullptr;
-static void *g_transform_set_localPosition = nullptr;
-static void *g_transform_get_localToWorldMatrix = nullptr;
 static void *g_transform_get_localScale = nullptr;
+static void *g_transform_set_localPosition = nullptr;
 static void *g_transform_get_position = nullptr;
 static void *g_transform_set_position = nullptr; // 世界平移（自由相机写）
 static void *g_transform_get_rotation = nullptr; // 世界旋转（gizmo 相机朝向用）
@@ -101,8 +131,11 @@ static void *g_component_get_transform = nullptr;
 static void *g_object_FindObjectOfType = nullptr; // Object.FindObjectOfType(Type)
 static void *g_component_get_gameObject = nullptr;
 static void *g_componentClass = nullptr; // UnityEngine.Component（GetComponents(Type) 用）
+static void *g_behaviourClass = nullptr;
 static void *g_gameObjectClass = nullptr; // UnityEngine.GameObject
 static void *g_gameObject_GetComponent = nullptr; // GameObject.GetComponent(Type)
+static void *g_gameObject_setActive = nullptr;
+static void *g_gameObject_get_activeSelf = nullptr;
 static void *g_gameObject_GetComponents = nullptr; // GameObject.GetComponents(Type)
 static void *g_cameraClass = nullptr;     // UnityEngine.Camera（get_main 用）
 static void *g_camera_get_main = nullptr; // Camera.get_main（gizmo 取视锥）
@@ -112,6 +145,9 @@ static void *g_camera_get_worldToCameraMatrix = nullptr; // Camera.get_worldToCa
 static void *g_camera_get_projectionMatrix = nullptr;    // Camera.get_projectionMatrix
 static void *g_skinnedMeshRendererClass = nullptr; // UnityEngine.SkinnedMeshRenderer
 static void *g_smr_get_sharedMesh = nullptr;        // get_sharedMesh
+static void *g_smr_get_bones = nullptr;
+static void *g_mesh_get_bindposes = nullptr;
+static void *g_transform_get_localToWorldMatrix = nullptr;
 static void *g_smr_GetBlendShapeWeight = nullptr;   // GetBlendShapeWeight(int)
 static void *g_smr_SetBlendShapeWeight = nullptr;   // SetBlendShapeWeight(int,float)
 static void *g_mesh_get_blendShapeCount = nullptr;  // Mesh.get_blendShapeCount
@@ -141,6 +177,7 @@ static void ResolveGameApi() {
       g_animator_GetBoneTransform = FindMethod(animClass, "GetBoneTransform", 1);
       g_animator_get_isHuman = FindMethod(animClass, "get_isHuman", 0);
       void *behClass = FindClass("UnityEngine", "Behaviour", asms, ac);
+      g_behaviourClass = behClass;
       if (behClass) {
         g_animator_get_enabled = FindMethod(behClass, "get_enabled", 0);
         g_animator_set_enabled = FindMethod(behClass, "set_enabled", 1);
@@ -149,6 +186,8 @@ static void ResolveGameApi() {
 
     void *trClass = FindClass("UnityEngine", "Transform", asms, ac);
     if (trClass) {
+      g_transform_get_localToWorldMatrix = FindMethod(trClass, "get_localToWorldMatrix", 0);
+      g_transform_get_localScale = FindMethod(trClass, "get_localScale", 0);
       g_transform_get_localRotation =
           FindMethod(trClass, "get_localRotation", 0);
       g_transform_set_localRotation =
@@ -157,8 +196,6 @@ static void ResolveGameApi() {
           FindMethod(trClass, "get_localPosition", 0);
       g_transform_set_localPosition =
           FindMethod(trClass, "set_localPosition", 1);
-      g_transform_get_localToWorldMatrix = FindMethod(trClass, "get_localToWorldMatrix", 0);
-      g_transform_get_localScale = FindMethod(trClass, "get_localScale", 0);
       g_transform_get_position = FindMethod(trClass, "get_position", 0);
       g_transform_set_position = FindMethod(trClass, "set_position", 1);
       g_transform_get_rotation = FindMethod(trClass, "get_rotation", 0);
@@ -187,8 +224,12 @@ static void ResolveGameApi() {
     void *goClass = FindClass("UnityEngine", "GameObject", asms, ac);
     if (goClass) {
       g_gameObjectClass = goClass;
-      g_gameObject_GetComponent = FindMethod(goClass, "GetComponent", 1);
-      g_gameObject_GetComponents = FindMethod(goClass, "GetComponents", 1);
+      g_gameObject_setActive = FindMethod(goClass, "SetActive", 1);
+      g_gameObject_get_activeSelf = FindMethod(goClass, "get_activeSelf", 0);
+      g_gameObject_GetComponent = FindComponentTypeQuery(goClass, "GetComponent", false);
+      g_gameObject_GetComponents = FindComponentTypeQuery(goClass, "GetComponents", true);
+      Log("[POSER] typed component queries: GetComponent(Type)=%p GetComponents(Type)=%p",
+          g_gameObject_GetComponent,g_gameObject_GetComponents);
     }
 
     void *camClass = FindClass("UnityEngine", "Camera", asms, ac);
@@ -209,6 +250,7 @@ static void ResolveGameApi() {
     // Task 4.1：面部/身体 BlendShape 读写
     void *smrClass = FindClass("UnityEngine", "SkinnedMeshRenderer", asms, ac);
     if (smrClass) {
+      g_smr_get_bones = FindMethod(smrClass, "get_bones", 0);
       g_skinnedMeshRendererClass = smrClass;
       g_smr_get_sharedMesh = FindMethod(smrClass, "get_sharedMesh", 0);
       g_smr_GetBlendShapeWeight =
@@ -218,6 +260,7 @@ static void ResolveGameApi() {
     }
     void *meshClass = FindClass("UnityEngine", "Mesh", asms, ac);
     if (meshClass) {
+      g_mesh_get_bindposes = FindMethod(meshClass, "get_bindposes", 0);
       g_mesh_get_blendShapeCount = FindMethod(meshClass, "get_blendShapeCount", 0);
       g_mesh_GetBlendShapeName = FindMethod(meshClass, "GetBlendShapeName", 1);
     }
@@ -287,28 +330,33 @@ static void ResolveEntityOffsets(void *entity) {
 }
 
 // 设置当前角色 Entity → 提取 Animator 存入 g_charAnimator
-static void SetCharacterEntity(void *entity) {
-  if (!entity)
-    return;
+static bool SetCharacterEntity(void *entity) {
+  if (CharacterSwitchInProgress() || !entity)
+    return false;
   ResolveEntityOffsets(entity);
   __try {
     int ecOff = SafeOff(OFF_entityComplexAnim, 0x110, "entityComplexAnim");
     void *cac = *(void **)((char *)entity + ecOff);
-    if (cac)
-      g_charAnimComp = cac;
+
     void *animator = nullptr;
     // 1) 先按已知偏移读
     if (cac && OFF_complexAnimAnimator >= 0)
       animator = *(void **)((char *)cac + OFF_complexAnimAnimator);
     // 2) 动态扫描 ComplexAnimationComponent 字段，找值类型为 Animator 的
     //    （不依赖硬编码偏移，角色/场景变化也能捕获）
-    if (!animator && cac && g_animatorClass) {
+    if (!UnityObjAlive(animator) && cac && g_animatorClass) {
       void *cacClass = il2cpp_object_get_class(cac);
       void *it = nullptr, *f;
       while ((f = il2cpp_class_get_fields(cacClass, &it))) {
+        // Do not reinterpret integer/value-type fields as object pointers.
+        if (il2cpp_field_get_flags(f) & 0x10)
+          continue;
+        void *type = il2cpp_field_get_type(f);
+        if (!type || il2cpp_class_from_type(type) != g_animatorClass)
+          continue;
         size_t off = il2cpp_field_get_offset(f);
         void *val = *(void **)((char *)cac + off);
-        if (val && il2cpp_object_get_class(val) == g_animatorClass) {
+        if (UnityObjAlive(val) && il2cpp_object_get_class(val) == g_animatorClass) {
           OFF_complexAnimAnimator = (int)off;
           animator = val;
           Log("[POSER] Animator found via field scan @0x%X", off);
@@ -316,7 +364,13 @@ static void SetCharacterEntity(void *entity) {
         }
       }
     }
-    if (animator && animator != g_charAnimator) {
+    if (!UnityObjAlive(animator) ||
+        il2cpp_object_get_class(animator) != g_animatorClass ||
+        !UnityObjAlive(SafeGetComponentTransform(animator)))
+      return false;
+    if (animator != g_charAnimator || entity != g_mainCharEntity) {
+      if (g_beforeCharacterChange)
+        g_beforeCharacterChange(); // Restore using OLD actor handles first.
       g_mainCharEntity = entity;
       g_charAnimator = animator;
       g_charChanged = true;
@@ -341,7 +395,10 @@ static void SetCharacterEntity(void *entity) {
       Log("[POSER] CharAnimator=%p isHuman=%d go='%s'", g_charAnimator,
           isHuman, goName);
     }
+    g_charAnimComp = cac;
+    return true;
   } __except (1) {
+    return false;
   }
 }
 
@@ -375,16 +432,15 @@ static void *FindPlayerControllerInstance() {
   if (!g_pcClass)
     return nullptr;
   __try {
-    const char *names[] = {"instance", "m_instance", "_instance", "s_Instance"};
-    for (int i = 0; i < 4; i++) {
+    const char *names[] = {"instance", "m_instance", "_instance", "s_Instance",
+                          "<Instance>k__BackingField", "<instance>k__BackingField"};
+    for (int i = 0; i < 6; i++) {
       void *fi = FindStaticFieldInfo(g_pcClass, names[i]);
       if (!fi)
         continue;
       void *obj = nullptr;
       il2cpp_field_static_get_value(fi, &obj);
       if (obj) {
-        Log("[POSER] PlayerController via static field '%s': %p", names[i],
-            obj);
         return obj;
       }
     }
@@ -395,7 +451,6 @@ static void *FindPlayerControllerInstance() {
       void *exc = nullptr;
       void *obj = il2cpp_runtime_invoke(m, nullptr, nullptr, &exc);
       if (obj && !exc) {
-        Log("[POSER] PlayerController via get_Instance: %p", obj);
         return obj;
       }
     }
@@ -404,19 +459,61 @@ static void *FindPlayerControllerInstance() {
   return nullptr;
 }
 
-static void TryCaptureFromPlayerController() {
-  if (!g_playerController) {
-    g_playerController = FindPlayerControllerInstance();
-    if (g_playerController)
-      Log("[POSER] Resolved PlayerController: %p", g_playerController);
+static void SelectCaptureEntity(void *entity) {
+  if (entity != g_captureEntity) {
+    if (g_beforeCharacterChange)
+      g_beforeCharacterChange(); // Stop even if the new Animator is not ready.
+    g_captureEntity = entity;
+    Log("[POSER] character selection: entity=%p controller=%p", entity,
+        g_playerController);
   }
-  if (!g_playerController || OFF_pcEntity < 0)
-    return;
+}
+static void TryCaptureFromPlayerController() {
+  if (CharacterSwitchInProgress()) return;
+  void *current = FindPlayerControllerInstance();
+  if (current) g_playerController = current;
+  void *entity = nullptr;
   __try {
-    void *entity = *(void **)((char *)g_playerController + OFF_pcEntity);
-    if (entity)
-      SetCharacterEntity(entity);
-  } __except (1) {
+    if (g_playerController && OFF_pcEntity >= 0)
+      entity = *(void **)((char *)g_playerController + OFF_pcEntity);
+  } __except (1) {}
+  g_editSelection.observe(g_playerController, entity);
+  if (g_editSelection.keepManual(UnityObjAlive(g_charAnimator))) return;
+  // A transient null must not discard a selection whose Animator is loading.
+  if (entity) SelectCaptureEntity(entity);
+  SetCharacterEntity(g_captureEntity);
+}
+static void ConsumeCapturedCharacter() {
+  if (CharacterSwitchInProgress()) return;
+  AcquireSRWLockExclusive(&g_pendingCharacterLock);
+  bool pending = g_pendingSelection;
+  void *controller = g_pendingController;
+  void *entity = g_pendingEntity;
+  g_pendingSelection = false;
+  ReleaseSRWLockExclusive(&g_pendingCharacterLock);
+  if (!pending)
+    return;
+  if (controller)
+    g_playerController = controller; // Every switch, not just the first one.
+  g_editSelection.observe(controller, entity, true);
+  if (g_editSelection.keepManual(UnityObjAlive(g_charAnimator))) return;
+  SelectCaptureEntity(entity);
+  SetCharacterEntity(entity);
+}
+
+// Preserve IL2CPP's hidden MethodInfo argument, and stop pose maintenance while
+// the game is tearing down/replacing the model inside SetMainCharacter.
+using SetMainCharacterFn = void (*)(void *, void *, bool, void *);
+static SetMainCharacterFn g_originalSetMainCharacter = nullptr;
+static void HookedSetMainCharacter(void *self, void *entity, bool flag, void *method) {
+  InterlockedCompareExchange(&g_gameLogicThreadId, LONG(GetCurrentThreadId()), 0);
+  InterlockedIncrement(&g_characterSwitchDepth);
+  __try {
+    if (g_originalSetMainCharacter)
+      g_originalSetMainCharacter(self, entity, flag, method);
+    if (!RuntimeClosing()) QueueCharacterSelection(self, entity);
+  } __finally {
+    InterlockedDecrement(&g_characterSwitchDepth);
   }
 }
 
@@ -453,26 +550,8 @@ static void InstallSetMainCharacterHook() {
       return;
     }
 
-    typedef void (*SetMainCharacter_t)(void *, void *, bool);
-    static SetMainCharacter_t orig_SetMainCharacter = nullptr;
-
-    struct SMHook {
-      static void Hooked(void *self, void *entity, bool flag) {
-        // Publish an event only. The editor selects the current entity under
-        // the same lock as the facial caches, after the game's switch finishes.
-        ++g_characterSwitchDepth;
-        __try {
-          if (orig_SetMainCharacter) orig_SetMainCharacter(self, entity, flag);
-        } __finally {
-          if (self) g_pendingPlayerController.store(self);
-          g_characterCapturePending.store(true);
-          --g_characterSwitchDepth;
-        }
-      }
-    };
-
     if (Hook(setMainChar, "PlayerController.SetMainCharacter",
-             (void *)SMHook::Hooked, (void **)&orig_SetMainCharacter)) {
+             (void *)HookedSetMainCharacter, (void **)&g_originalSetMainCharacter)) {
       Log("[POSER] SetMainCharacter hooked");
       TryCaptureFromPlayerController(); // 尝试补捞当前已就绪角色
     }
@@ -508,7 +587,7 @@ static void *GetHumanoidBone(HumanBodyBones bone) {
 
 // Component.get_transform（获取组件所在 GameObject 的 Transform）
 static void *SafeGetComponentTransform(void *component) {
-  if (!component || !g_component_get_transform)
+  if (CharacterSwitchInProgress() || !UnityObjAlive(component) || !g_component_get_transform)
     return nullptr;
   __try {
     return Invoke(g_component_get_transform, component);
@@ -536,6 +615,40 @@ static bool UnityObjAlive(void *obj) {
   }
 }
 
+// ECS animation records are not necessarily Unity Behaviour objects. Their
+// field at 0x10 must never be interpreted as a native Behaviour pointer.
+static bool LiveBehaviour(void *object) {
+  if (!object || !g_behaviourClass || !il2cpp_object_get_class ||
+      !il2cpp_class_get_parent) return false;
+  __try {
+    void *klass = il2cpp_object_get_class(object);
+    for (int depth = 0; klass && depth < 64; ++depth) {
+      if (klass == g_behaviourClass) return UnityObjAlive(object);
+      klass = il2cpp_class_get_parent(klass);
+    }
+  } __except (1) {}
+  return false;
+}
+static bool ReadBehaviourEnabled(void *object, bool &enabled) {
+  if (CharacterSwitchInProgress() || !g_animator_get_enabled || !LiveBehaviour(object)) return false;
+  __try {
+    void *boxed = Invoke(g_animator_get_enabled, object);
+    if (!boxed) return false;
+    enabled = *reinterpret_cast<bool *>(static_cast<char *>(boxed) + 16);
+    return true;
+  } __except (1) { return false; }
+}
+static void WriteBehaviourEnabled(void *object, bool enabled) {
+  if (CharacterSwitchInProgress() || !g_animator_set_enabled || !LiveBehaviour(object)) return;
+  __try {
+    bool current;
+    if (ReadBehaviourEnabled(object, current) && current == enabled) return;
+    int value = enabled ? 1 : 0;
+    void *args[] = {&value};
+    Invoke(g_animator_set_enabled, object, args);
+  } __except (1) {}
+}
+
 static bool CharAnimatorAlive() {
   if (!UnityObjAlive(g_charAnimator))
     return false;
@@ -544,7 +657,7 @@ static bool CharAnimatorAlive() {
 
 static Quat GetBoneLocalRot(void *t) {
   Quat q{0, 0, 0, 1};
-  if (!t || !g_transform_get_localRotation)
+  if (CharacterSwitchInProgress() || !UnityObjAlive(t) || !g_transform_get_localRotation)
     return q;
   __try {
     void *boxed = Invoke(g_transform_get_localRotation, t);
@@ -564,7 +677,7 @@ static void (*g_boneWriteHook)(void *transform) = nullptr;
 static void (*g_boneWriteHook2)(void *transform) = nullptr;
 
 static void SetBoneLocalRot(void *t, Quat q) {
-  if (!t || !g_transform_set_localRotation)
+  if (CharacterSwitchInProgress() || !UnityObjAlive(t) || !g_transform_set_localRotation)
     return;
   __try {
     void *params[] = {&q};
@@ -579,7 +692,7 @@ static void SetBoneLocalRot(void *t, Quat q) {
 
 static Vec3 GetBoneLocalPos(void *t) {
   Vec3 p{0, 0, 0};
-  if (!t || !g_transform_get_localPosition)
+  if (CharacterSwitchInProgress() || !UnityObjAlive(t) || !g_transform_get_localPosition)
     return p;
   __try {
     void *boxed = Invoke(g_transform_get_localPosition, t);
@@ -591,7 +704,7 @@ static Vec3 GetBoneLocalPos(void *t) {
 }
 
 static void SetBoneLocalPos(void *t, Vec3 p) {
-  if (!t || !g_transform_set_localPosition)
+  if (CharacterSwitchInProgress() || !UnityObjAlive(t) || !g_transform_set_localPosition)
     return;
   __try {
     void *params[] = {&p};
@@ -620,7 +733,7 @@ static void GetBoneName(void *transform, char *buf, int sz) {
 // ---- 世界空间位姿（IK 求解 / gizmo 定位用）----
 static Vec3 GetBoneWorldPos(void *t) {
   Vec3 p{0, 0, 0};
-  if (!t || !g_transform_get_position)
+  if (CharacterSwitchInProgress() || !UnityObjAlive(t) || !g_transform_get_position)
     return p;
   __try {
     void *boxed = Invoke(g_transform_get_position, t);
@@ -633,7 +746,7 @@ static Vec3 GetBoneWorldPos(void *t) {
 
 static Quat GetBoneWorldRot(void *t) {
   Quat q{0, 0, 0, 1};
-  if (!t || !g_transform_get_rotation)
+  if (CharacterSwitchInProgress() || !UnityObjAlive(t) || !g_transform_get_rotation)
     return q;
   __try {
     void *boxed = Invoke(g_transform_get_rotation, t);
@@ -646,32 +759,21 @@ static Quat GetBoneWorldRot(void *t) {
 
 // ---- 世界空间写（自由相机/IK 目标移动用）----
 static void SetBoneWorldPos(void *t, Vec3 p) {
-  if (!t || !g_transform_set_position)
+  if (CharacterSwitchInProgress() || !UnityObjAlive(t) || !g_transform_set_position)
     return;
   __try {
     void *params[] = {&p};
     Invoke(g_transform_set_position, t, params);
   } __except (1) {
   }
-  // 世界坐标写入同样算"手动编辑"：不触发钩子的话，IK 解算 / gizmo 的结果不会进
-  // 冻结快照，切角色时保存的就是旧姿势（实测：IK 拖动切走再切回来动作没了）。
-  if (g_boneWriteHook)
-    g_boneWriteHook(t);
-  if (g_boneWriteHook2)
-    g_boneWriteHook2(t);
 }
 
 static void SetBoneWorldRot(void *t, Quat q) {
-  if (!t || !g_transform_set_rotation)
+  if (CharacterSwitchInProgress() || !UnityObjAlive(t) || !g_transform_set_rotation)
     return;
   __try {
     void *params[] = {&q};
     Invoke(g_transform_set_rotation, t, params);
   } __except (1) {
   }
-  // 同上：IK 解算就是走这个函数写骨的，必须同步进快照（见上一条注释）。
-  if (g_boneWriteHook)
-    g_boneWriteHook(t);
-  if (g_boneWriteHook2)
-    g_boneWriteHook2(t);
 }

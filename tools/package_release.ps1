@@ -43,6 +43,9 @@ $required = @(
   (Join-Path $root 'LICENSE'),
   (Join-Path $root 'THIRD_PARTY_NOTICES'),
   (Join-Path $root '安全安装.bat'),
+  (Join-Path $root 'tools\deploy.ps1'),
+  (Join-Path $root 'tools\character_face_resources.ps1'),
+  (Join-Path $root 'docs\mmd-player.md'),
   $noticeSrc, $tutorialSrc, $notesSrc, $configSrc,
   (Join-Path $root 'plugin\poser.dll'),
   (Join-Path $root 'plugin\d3dcompiler_47.dll'),
@@ -125,6 +128,20 @@ Copy-Item -LiteralPath (Join-Path $root 'plugin\poser.dll')            -Destinat
 Copy-Item -LiteralPath (Join-Path $root 'plugin\d3dcompiler_47.dll')   -Destination (Join-Path $stage 'd3dcompiler_47.dll') -Force
 Copy-Item -LiteralPath (Join-Path $root 'plugin\vulkan-1.dll')         -Destination (Join-Path $stage 'vulkan-1.dll') -Force
 & (Join-Path $PSScriptRoot 'copy_character_faces.ps1') -Destination (Join-Path $stage 'plugin\mmd\character-faces')
+
+# Include the complete installer payload. Runtime profiles remain in plugin/
+# for manual installs; the installer uses resources/ and preserves user edits.
+New-Item -ItemType Directory -Force -Path (Join-Path $stage 'tools'), (Join-Path $stage 'docs'), (Join-Path $stage 'resources\character-faces') | Out-Null
+foreach ($tool in @('deploy.ps1', 'character_face_resources.ps1')) {
+  Copy-Item -LiteralPath (Join-Path $root ('tools\' + $tool)) -Destination (Join-Path $stage ('tools\' + $tool))
+}
+Copy-Item -LiteralPath (Join-Path $root 'docs\mmd-player.md') -Destination (Join-Path $stage 'docs\mmd-player.md')
+Copy-Item -LiteralPath (Join-Path $root 'docs\tutorial.md') -Destination (Join-Path $stage 'docs\tutorial.md')
+Copy-Item -LiteralPath (Join-Path $root 'docs\notice.md') -Destination (Join-Path $stage 'docs\notice.md')
+Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination (Join-Path $stage 'README.md')
+foreach ($profile in Get-ChildItem -LiteralPath (Join-Path $root 'resources\character-faces') -Filter '*.face.json' -File) {
+  Copy-Item -LiteralPath $profile.FullName -Destination (Join-Path $stage 'resources\character-faces')
+}
 
 # --- 发版前署名自查 ---
 $names = @()

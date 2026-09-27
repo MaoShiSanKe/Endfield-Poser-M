@@ -266,7 +266,7 @@ static void RosterMakeDisplay(const char *goName, char *out, int sz) {
 }
 
 static void RosterDump() {
-  FILE *f = fopen("plugin\\poser_roster.txt", "wb");
+  FILE *f = OpenPoserFile(L"poser_roster.txt", L"wb");
   if (!f) {
     Log("[ROSTER] WARN: cannot write plugin/poser_roster.txt");
     return;
@@ -300,7 +300,16 @@ static void RosterDump() {
 }
 
 // 面板里点「扫描角色」时调用。只读。
-static void ScanSceneForCharacters() {
+// Requests are consumed on a normal game callback. Rendering only uses the
+// cached list and never blocks on a scene scan or replaces actor handles.
+static bool g_rosterScanPending = false;
+static int g_rosterSelectPending = -1;
+static std::shared_ptr<GripReferences> g_rosterReferences;
+static std::shared_ptr<GripReferences> g_selectedRosterReferences;
+static void ScanSceneForCharacters() { g_rosterScanPending = true; }
+static void ScanSceneForCharactersNow() {
+  g_rosterReferences = std::make_shared<GripReferences>();
+
   ResolveRosterApi();
   g_rosterCharCount = 0;
   g_rosterAnimatorTotal = 0;
@@ -323,13 +332,14 @@ static void ScanSceneForCharacters() {
     return;
   }
   int n = *(int *)((char *)arr + IL2CPP_ARRAY_LEN);
+  if (n < 0 || n > 65536 || !il2cpp_gchandle_new) return;
   void **data = (void **)((char *)arr + IL2CPP_ARRAY_DATA);
   g_rosterAnimatorTotal = n;
   Log("[ROSTER] animators total = %d, filtering by name pattern 'chr_'", n);
 
   for (int i = 0; i < n && g_rosterCharCount < ROSTER_MAX_CHARS; i++) {
     void *an = data[i];
-    if (!an)
+    if (!UnityObjAlive(an))
       continue;
     void *go = Invoke(g_component_get_gameObject, an);
     if (!go)
@@ -358,6 +368,9 @@ static void ScanSceneForCharacters() {
     if (e.entityGo && g_rosterCharAnimCompClass)
       e.animComp = RosterGetComponentOfClass(e.entityGo, g_rosterCharAnimCompClass);
     RosterCollectComps(go, e);
+    uint32_t handle = il2cpp_gchandle_new(an, false);
+    if (!handle) continue;
+    g_rosterReferences->handles.push_back(handle);
     g_rosterChars[g_rosterCharCount++] = e;
   }
   RosterDump();
@@ -367,36 +380,37 @@ static void ScanSceneForCharacters() {
 // 把"编辑目标"切到列表里的第 idx 个角色：存旧角色状态 → 换目标 → 重建骨骼/从骨/形态 →
 // 恢复该角色自己的冻结状态（没冻过就保持游戏默认）。
 // 注意：只换"我们在编辑谁"，**不改变游戏自己操控的角色**（那个还是游戏说了算）。
-static void RosterSwitchEditTarget(int idx) {
-  if (idx < 0 || idx >= g_rosterCharCount)
-    return;
-  RosterChar &e = g_rosterChars[idx];
-  if (!e.animator || e.animator == g_charAnimator)
-    return;
-  Log("[ROSTER] switch edit target -> \"%s\" (animator=%p entityGo=%p animComp=%p) "
-      "| before: curKey='%s' frozen=%d",
-      e.display, e.animator, e.entityGo, e.animComp, g_curCharKey.c_str(),
-      (int)g_frozen);
-  SaveCharStateOnSwitch(); // 旧角色：冻过就存进内存表（并保持它在后台冻结）
+static void RosterSwitchEditTarget(int idx) { g_rosterSelectPending = idx; }
+static void RosterSwitchEditTargetNow(int idx) {
+  if (idx < 0 || idx >= g_rosterCharCount) return;
+  const RosterChar &e = g_rosterChars[idx];
+  if (!UnityObjAlive(e.animator) || e.animator == g_charAnimator) return;
+  if (!UnityObjAlive(SafeGetComponentTransform(e.animator))) return;
+  g_preserveGripOnHandoff = true;
+  try { PrepareCharacterHandoff(); }
+  catch (...) { g_preserveGripOnHandoff = false; throw; }
+  g_preserveGripOnHandoff = false;
+  g_selectedRosterReferences = g_rosterReferences;
   g_charAnimator = e.animator;
-  g_charAnimComp = e.animComp; // 若为空，冻结只能靠 Animator + IK 抑制
-  g_mainCharEntity = nullptr;  // 扫描只拿到 GameObject，拿不到 Entity
-  g_charChanged = false;       // 重建我们自己走完，别让 GameFrameTick 再走一遍
-  s_restCaptured = false;
-  RebuildAllBones();
-  RebuildHumanBones();
-  RebuildAccessories();
-  RebuildBlendShapes();
-  ResetSMCState();
-  ResetSkirtState();
-  CaptureRestPose();
-  RestoreCharStateOnSwitch(); // 冻过 → 恢复姿态并重新压制写者；没冻过 → 保持默认
-  IkOnCharacterChanged();     // IK 控制器跟着换目标（骨骼重绑 + 目标点重新吸附）
-  Log("[ROSTER] edit target = \"%s\" bones=%d frozen=%d | grips=%d hasGripForTarget=%d",
-      e.display, s_humanBoneCount, (int)g_frozen, FrozenGripCount(),
-      (int)FrozenGripHas(e.animator));
-  for (int gi = 0; gi < FrozenGripCount(); gi++)
-    Log("[ROSTER]   grip#%d animator=%p", gi, FrozenGripAnimator(gi));
+  g_charAnimComp = UnityObjAlive(e.animComp) ? e.animComp : nullptr;
+  g_mainCharEntity = g_captureEntity = nullptr;
+  g_editSelection.selectManual();
+  g_charChanged = true;
+  RebuildCapturedCharacter();
+  Log("[ROSTER] edit target = %s bones=%d frozen=%d", e.display,
+      s_humanBoneCount, int(g_frozen));
+}
+static void RosterService() {
+  if (GetCurrentThreadId() != g_frameGameThreadId.load()) return;
+  if (g_rosterSelectPending >= 0) {
+    const int target = g_rosterSelectPending;
+    g_rosterSelectPending = -1;
+    RosterSwitchEditTargetNow(target);
+  }
+  if (g_rosterScanPending) {
+    g_rosterScanPending = false;
+    ScanSceneForCharactersNow();
+  }
 }
 
 static void DrawRosterPanel() {
@@ -410,7 +424,7 @@ static void DrawRosterPanel() {
   if (ImGui::Button(u8"\u5237\u65b0\u5217\u8868"))
     ScanSceneForCharacters();
   ImGui::SameLine();
-  ImGui::TextDisabled("(%d)", g_rosterCharCount);
+  ImGui::TextDisabled(g_rosterScanPending ? u8"等待游戏更新… (%d)" : "(%d)", g_rosterCharCount);
   ImGui::Separator();
   if (g_rosterCharCount == 0)
     ImGui::TextDisabled("(empty - press the button above)");
@@ -432,9 +446,3 @@ static void DrawRosterPanel() {
   }
   ImGui::End();
 }
-
-// TODO（多角色编辑后续）：
-//   1) 每个角色各自的冻结状态改按**实例**存（现在 g_charStates 用模型名当键，
-//      同屏两个同名角色会共用一份）；
-//   2) 多角色**同时**冻结：每帧按"冻结中的角色"逐个钉姿势，而不是只钉当前编辑目标；
-//   3) 面板里显示每个角色的冻结标记 / 骨骼数。

@@ -7,6 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 行尾字节解析成反斜杠续行符，导致下一行被吞（C2046 等假错误）。
 if(MSVC)
   add_compile_options(/utf-8)
+  # The game ships MSVCP140 14.29; newer constexpr mutex initialization is
+  # incompatible with that private runtime. Keep the legacy initialization ABI.
+  add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 endif()
 
 # 输出目录统一到 plugin/（与 build.bat 的部署布局一致）
@@ -19,13 +22,21 @@ if(WIN32)
     src/poser.cpp
     src/poser.rc
     src/config.h
+    src/core/user_agreement.h src/editor/panel_agreement.h
+    src/math/mmd_motion.h src/math/mmd_rig.h src/math/mmd_retarget.h src/math/mmd_props.h src/math/mmd_adaptation.h src/math/mmd_amplitude.h
+    src/game/mmd_player.h src/game/mmd_io.h src/game/frozen_grip.h src/editor/panel_mmd.h src/editor/panel_mmd_adaptation.h
     src/core/game_hooks.h
-    src/core/gui_overlay.h
-    src/game/skeleton.h src/game/freeze.h src/game/accessory.h src/game/morph.h src/game/smc_morph.h
+    src/core/gui_overlay.h src/core/layered_readback.h src/core/overlay_device.h
+    src/core/frame_driver.h src/math/frame_cadence.h
+    src/core/runtime_bootstrap.h src/core/runtime_lifetime.h src/core/runtime_shutdown.h src/core/plugin_paths.h src/core/proxy_loader.h
+    src/game/mmd_audio.h src/math/mmd_audio_sync.h
+    src/game/mmd_camera.h src/math/mmd_camera.h src/game/eye_gaze.h src/math/eye_gaze.h
+    src/math/cloth_state.h src/game/cloth.h src/game/cloth_anchor.h
+    src/game/skeleton.h src/game/freeze.h src/game/accessory.h src/game/morph.h src/game/smc_morph.h src/game/smc_automation.h
+    src/math/character_face.h src/math/face_geometry.h src/math/mmd_face_controls.h
+    src/math/face_mixing.h
     src/game/char_state.h
-    src/core/pose_lock.h src/game/character_face_library.h src/game/smc_automation.h
-    src/math/face_math.h src/math/face_geometry.h src/math/face_mixing.h
-    src/math/character_face.h src/math/mmd_face_controls.h
+    src/game/roster.h src/math/edit_selection.h
     src/editor/selection.h src/editor/panel_library.h src/editor/panel_morph.h
     src/editor/panel_bones.h
     src/editor/ik_control.h
@@ -79,14 +90,25 @@ if(WIN32)
             ${CMAKE_CURRENT_SOURCE_DIR}/plugin/vulkan-1.dll)
 endif()
 
-# ---- 数学单测（跨平台，Linux g++ 也可编；每个测试独立可执行）----
-function(add_poser_test name src)
-  add_executable(${name} ${src} src/math/quat_math.h src/math/ik_two_bone.h src/math/pose_file.h)
-  target_include_directories(${name} PRIVATE src deps/json)
-  add_test(NAME ${name} COMMAND ${name})
-endfunction()
-
-add_poser_test(test_quat tests/test_quat.cpp)
-add_poser_test(test_ik tests/test_ik.cpp)
-add_poser_test(test_pose_file tests/test_pose_file.cpp)
-enable_testing()
+# Existing public math tests remain available in a clean checkout. Additional
+# local regression fixtures are optional and are not distributed.
+option(POSER_BUILD_TESTS "Build available regression tests" ON)
+if(POSER_BUILD_TESTS)
+  enable_testing()
+  file(GLOB POSER_TEST_SOURCES CONFIGURE_DEPENDS tests/test_*.cpp)
+  foreach(test_source IN LISTS POSER_TEST_SOURCES)
+    get_filename_component(test_name "${test_source}" NAME_WE)
+    if(NOT WIN32 AND NOT test_name MATCHES "^test_(quat|ik|pose_file|mmd|mmd_camera|mmd_transport|character_faces|face_mixing|eye_gaze|edit_selection)$")
+      continue()
+    endif()
+    add_executable(${test_name} "${test_source}")
+    target_include_directories(${test_name} PRIVATE src deps/json deps/imgui deps/minhook_lib/include)
+    if(MSVC)
+      target_compile_options(${test_name} PRIVATE /EHa)
+      target_link_libraries(${test_name} PRIVATE d3d11
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/minhook_lib/lib/libMinHook.x64.lib)
+    endif()
+    add_test(NAME ${test_name} COMMAND ${test_name})
+    set_tests_properties(${test_name} PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+  endforeach()
+endif()
