@@ -146,7 +146,15 @@ foreach ($tool in @('deploy.ps1', 'character_face_resources.ps1')) {
 Copy-Item -LiteralPath (Join-Path $root 'docs\mmd-player.md') -Destination (Join-Path $stage 'docs\mmd-player.md')
 Copy-Item -LiteralPath (Join-Path $root 'docs\tutorial.md') -Destination (Join-Path $stage 'docs\tutorial.md')
 Copy-Item -LiteralPath (Join-Path $root 'docs\notice.md') -Destination (Join-Path $stage 'docs\notice.md')
+Copy-Item -LiteralPath (Join-Path $root 'docs\roadmap.md') -Destination (Join-Path $stage 'docs\roadmap.md')
+Copy-Item -LiteralPath (Join-Path $root 'docs\qq-group.jpg') -Destination (Join-Path $stage 'docs\qq-group.jpg')
 Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination (Join-Path $stage 'README.md')
+foreach ($rootDoc in @('使用须知.md', '使用教程.md')) {
+  $docPath = Join-Path $stage $rootDoc
+  $docText = [IO.File]::ReadAllText($docPath)
+  $docText = $docText.Replace('](mmd-player.md', '](docs/mmd-player.md')
+  [IO.File]::WriteAllText($docPath, $docText, [Text.UTF8Encoding]::new($true))
+}
 foreach ($profile in Get-ChildItem -LiteralPath (Join-Path $root 'resources\character-faces') -Filter '*.face.json' -File) {
   Copy-Item -LiteralPath $profile.FullName -Destination (Join-Path $stage 'resources\character-faces')
 }

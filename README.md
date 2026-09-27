@@ -103,7 +103,7 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build
 endfield-poser/
 ├── CMakeLists.txt        # Windows: 插件 DLL + 代理 DLL；tests: 数学单测
 ├── build.bat             # 有 cmake 时的一键构建（否则回退 build_msvc.ps1）
-├── deps/                 # 自包含第三方：imgui / imguizmo / minhook_lib / json
+├── deps/                 # 随源码提供的依赖，许可见 THIRD_PARTY_NOTICES
 ├── packaging/            # 发布包里的安装说明与默认配置模板
 ├── tools/                # build_msvc.ps1、package_release.ps1、setup_winsdk.ps1 等
 ├── src/
@@ -194,7 +194,7 @@ endfield-poser/
   **king_time@foxmail.com**（或 [issue](https://github.com/honxi1/Endfield-Poser/issues) /
   文末交流群）联系作者，**收到通知后会第一时间处理（包括删除相关内容、停止分发）**。
 - **如果你不接受以上任何一条，请立即停止使用并删除本工具**：用包内 `安全安装.bat` 卸载
-  （选 `3`；它会还原备份、移除插件本体，但保留 `plugin\` 里的姿态预设与配置），
+  （选 `2`；它会还原备份、移除插件本体，但保留 `plugin\` 里的姿态预设与配置），
   要彻底删除就连 `plugin\` 文件夹一起删掉。
 
 </details>
