@@ -29,6 +29,7 @@ static void RebuildCapturedCharacter();
 #include "editor/panel_morph.h"
 #include "editor/panel_mmd.h"
 #include "editor/panel_agreement.h"
+#include "game/cloth_init.h"
 #include "config.h"
 
 // 手动刷新骨骼（面板按钮 / WebUI /api/refresh 共用）
@@ -847,6 +848,9 @@ static DWORD WINAPI InitThread(LPVOID) {
   // No managed thread is retained while waiting for user input.
   while (!poser_agreement::Allowed() && !RuntimeClosing()) Sleep(50);
   if (RuntimeClosing()) return 0;
+  // Prepare offline payloads without keeping a managed thread attached or
+  // blocking the UI pose lock while the installed asset index is read.
+  ClothInitializeHost();
   std::lock_guard<std::recursive_mutex> poseLock(g_poseMutex);
   RuntimeThreadScope runtime;
   if (!runtime.ready) return 0;

@@ -1,12 +1,9 @@
 #pragma once
-// Adapted from Sasye/EIEM (AGPL-3.0), commit 94aa8391ef9677146e3e5c456b57dddbd0cc8546.
-// Source: https://github.com/Sasye/EIEM/tree/94aa8391ef9677146e3e5c456b57dddbd0cc8546/src
 
-
-static bool ClothFinitePosition(Vec3 v) {
+static bool ClothFinitePosition(Vector3 v) {
   return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
-static bool ClothSameLocal(Vec3 a, Quat q, Vec3 b, Quat r) {
+static bool ClothSameLocal(Vector3 a, Quaternion q, Vector3 b, Quaternion r) {
   const double qn = double(q.x)*q.x + double(q.y)*q.y + double(q.z)*q.z + double(q.w)*q.w;
   const double rn = double(r.x)*r.x + double(r.y)*r.y + double(r.z)*r.z + double(r.w)*r.w;
   const double dot = double(q.x)*r.x + double(q.y)*r.y + double(q.z)*r.z + double(q.w)*r.w;
@@ -15,7 +12,7 @@ static bool ClothSameLocal(Vec3 a, Quat q, Vec3 b, Quat r) {
       fabs(a.y-b.y) <= 0.00001 && fabs(a.z-b.z) <= 0.00001 &&
       fabs(dot) / sqrt(qn*rn) >= 0.999999;
 }
-static bool ClothReadLocal(void *transform, Vec3 &position, Quat &rotation) {
+static bool ClothReadLocal(void *transform, Vector3 &position, Quaternion &rotation) {
   if (!transform) return false;
   void *cls = il2cpp_object_get_class(transform);
   return ClothValue(ClothMethod(cls, "get_localPosition", "UnityEngine.Vector3"), transform, position) &&
@@ -24,7 +21,7 @@ static bool ClothReadLocal(void *transform, Vec3 &position, Quat &rotation) {
 }
 static void ClothAnchorLog(const ClothAnchor &a, const char *event, const char *reason) {
   Log("[CLOTH-ANCHOR-%s] backend=%s generation=%llu session=%llu owner=%p frame=%d instance=%d bone='%s' parent='%s' bindKnown=%d sent=%d confirmed=%d originalLocal=(%g,%g,%g) originalRotation=(%g,%g,%g,%g) targetLocal=(%g,%g,%g) targetRotation=(%g,%g,%g,%g) observedLocal=(%g,%g,%g) observedRotation=(%g,%g,%g,%g) bindReason=%s reason=%s",
-      event, "mmd",
+      event, "MMD",
       (unsigned long long)s_cloth.owner.generation, (unsigned long long)s_cloth.owner.session,
       reinterpret_cast<void *>(s_cloth.owner.character), ClothFrame(), a.ref.id.instance,
       a.name, a.parentName, a.bindKnown, a.sent, a.confirmed,
@@ -66,8 +63,8 @@ static bool ClothFindBindRecord(void *skeleton, void *human, void *boneClass, vo
   if (stride < 40 || stride > 256 || humanStride < 16 || humanStride > 256) return false;
   const int name = ClothValueOffset(boneClass, "name", "System.String", stride, sizeof(void *));
   const int parent = ClothValueOffset(boneClass, "parentName", "System.String", stride, sizeof(void *));
-  const int pos = ClothValueOffset(boneClass, "position", "UnityEngine.Vector3", stride, sizeof(Vec3));
-  const int rot = ClothValueOffset(boneClass, "rotation", "UnityEngine.Quaternion", stride, sizeof(Quat));
+  const int pos = ClothValueOffset(boneClass, "position", "UnityEngine.Vector3", stride, sizeof(Vector3));
+  const int rot = ClothValueOffset(boneClass, "rotation", "UnityEngine.Quaternion", stride, sizeof(Quaternion));
   const int humanName = ClothValueOffset(humanClass, "m_BoneName", "System.String", humanStride, sizeof(void *));
   a.bindReason = "avatar-field-type-or-boxed-layout-unavailable";
   if (name < 0 || parent < 0 || pos < 0 || rot < 0 || humanName < 0) return false;
@@ -189,7 +186,7 @@ static void ClothCaptureAnchors(ClothInstance &i, int member, bool beforeSuppres
     ClothLog("ANCHOR-COVERAGE", &i, "metadata-exception-no-unknown-bind-writes");
   }
 }
-static bool ClothWriteAnchorLocal(void *transform, Vec3 position, Quat rotation, bool restore = false) {
+static bool ClothWriteAnchorLocal(void *transform, Vector3 position, Quaternion rotation, bool restore = false) {
   if (!restore && !ClothOwns(s_cloth.owner)) return false;
   void *cls = il2cpp_object_get_class(transform), *unused = nullptr;
   void *pos = ClothMethod(cls, "set_localPosition", "System.Void", "UnityEngine.Vector3");
@@ -210,7 +207,7 @@ static bool ClothRestoreAnchor(ClothAnchor &a) {
   if (parentState == ClothLife::Destroyed) {
     a.changed = false; ClothAnchorLog(a, "RESTORE", "parent-changed-preserve-native-hierarchy"); return true;
   }
-  Vec3 p{}; Quat q{};
+  Vector3 p{}; Quaternion q{};
   bool ok = ClothWriteAnchorLocal(obj, a.originalPosition, a.originalRotation, true) &&
       ClothReadLocal(obj, p, q) && ClothSameLocal(p, q, a.originalPosition, a.originalRotation);
   if (ok) { a.observedPosition = p; a.observedRotation = q; }
@@ -223,7 +220,7 @@ static bool ClothUpdateAnchors(ClothInstance &i, int member, int frame, ClothBon
   if (!i.last.state.readable || !i.last.state.active || !i.last.state.running || !i.last.state.valid ||
       !i.last.state.enabled || !i.last.state.processEnabled || i.last.state.skip ||
       i.last.state.culled || i.last.state.paused || !std::isfinite(i.originalWeight) ||
-      poser_cloth::WeightAtTarget(i.originalWeight)) return true;
+      eiem_cloth::WeightAtTarget(i.originalWeight)) return true;
   for (size_t n = 0; n < s_cloth.anchors.count; ++n) {
     auto &a = s_cloth.anchors.entries[n].value;
     if (!(a.members & (uint64_t(1) << member)) || a.skipped || !a.bindKnown || a.lastFrame == frame) continue;
@@ -249,7 +246,7 @@ static bool ClothUpdateAnchors(ClothInstance &i, int member, int frame, ClothBon
       if (a.changed) return false;
       a.skipped = true; continue;
     }
-    Vec3 p{}; Quat q{};
+    Vector3 p{}; Quaternion q{};
     if (!ClothReadLocal(root, p, q)) return false;
     a.observedPosition = p; a.observedRotation = q;
     if (a.sent) {

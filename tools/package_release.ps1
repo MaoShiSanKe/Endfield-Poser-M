@@ -12,7 +12,7 @@
     - DLL 由 tools\build_msvc.ps1 产出到 plugin\，本脚本只组装与校验，不编译。
     - 包内固定带 LICENSE 与 THIRD_PARTY_NOTICES（AGPL 分发要求），并在打包前跑一遍
       「署名自查」：以 THIRD_PARTY_NOTICES 里列出的名称为关键词扫包内文本文件，
-      THIRD_PARTY_NOTICES 自身除外；命中即报错。
+      THIRD_PARTY_NOTICES 与 licenses/ 许可文件除外；命中即报错。
     - 面向用户的四个文件来自版本库：docs/notice.md（→ 使用须知.md）、
       docs/tutorial.md（→ 使用教程.md）、packaging\安装说明.txt、packaging\poser_config.txt。
 #>
@@ -42,6 +42,9 @@ $noticeSrc   = Join-Path $root 'docs\notice.md'
 $required = @(
   (Join-Path $root 'LICENSE'),
   (Join-Path $root 'THIRD_PARTY_NOTICES'),
+  (Join-Path $root 'licenses\cloth-upstream.txt'),
+  (Join-Path $root 'licenses\Brotli.txt'),
+  (Join-Path $root 'build\cloth_resources.exe'),
   (Join-Path $root '安全安装.bat'),
   (Join-Path $root 'tools\deploy.ps1'),
   (Join-Path $root 'tools\character_face_resources.ps1'),
@@ -99,8 +102,12 @@ $newer = Get-ChildItem -Recurse -File -LiteralPath (Join-Path $root 'src') |
 if ($newer) {
   Write-Host "警告：有 $($newer.Count) 个源文件比 poser.dll 新，包里的 DLL 可能是旧的（先跑 build_msvc.ps1）" -ForegroundColor Yellow
   $newer | Select-Object -First 5 | ForEach-Object { Write-Host "  $($_.Name)  $($_.LastWriteTime)" }
-  if (-not $AllowStaleDlls) { Write-Host '  确要照发请加 -AllowStaleDlls' -ForegroundColor Yellow }
+  if (-not $AllowStaleDlls) { throw '请先重新构建；确需旧 DLL 时显式使用 -AllowStaleDlls。' }
 }
+
+# The DLL must contain the same clothing payloads as this source tree.
+& (Join-Path $root 'build\cloth_resources.exe') --repo $root --dll $dll
+if ($LASTEXITCODE -ne 0) { throw 'Embedded clothing resource verification failed.' }
 
 # --- 组装 ---
 if (Test-Path -LiteralPath $stage) {
@@ -109,7 +116,7 @@ if (Test-Path -LiteralPath $stage) {
     exit 1
   }
   $stageFull = [IO.Path]::GetFullPath($stage)
-  if (-not $stageFull.StartsWith([IO.Path]::GetFullPath($releaseRoot))) {
+  if (-not $stageFull.StartsWith([IO.Path]::GetFullPath($releaseRoot).TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
     Write-Host "拒绝删除不在 build\release 下的路径：$stageFull" -ForegroundColor Red
     exit 1
   }
@@ -117,6 +124,7 @@ if (Test-Path -LiteralPath $stage) {
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'plugin') | Out-Null
 
+Copy-Item -LiteralPath (Join-Path $root 'licenses') -Destination (Join-Path $stage 'licenses') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE')            -Destination (Join-Path $stage 'LICENSE') -Force
 Copy-Item -LiteralPath (Join-Path $root 'THIRD_PARTY_NOTICES') -Destination (Join-Path $stage 'THIRD_PARTY_NOTICES') -Force
 Copy-Item -LiteralPath (Join-Path $root '安全安装.bat')         -Destination (Join-Path $stage '安全安装.bat') -Force
@@ -161,7 +169,7 @@ $riskyHits = @()
 $riskyWords = @('反作弊', 'AntiCheat', '绕过检测', '规避检测')
 Get-ChildItem -Recurse -File -LiteralPath $stage | ForEach-Object {
   if ($scanExt -notcontains $_.Extension.ToLower()) { return }
-  if ($_.Name -eq 'THIRD_PARTY_NOTICES') { return }
+  if ($_.Name -eq 'THIRD_PARTY_NOTICES' -or $_.FullName.StartsWith((Join-Path $stage 'licenses') + '\', [StringComparison]::OrdinalIgnoreCase)) { return }
   $text = Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8
   foreach ($n in $names) {
     if ($text -match [regex]::Escape($n)) { $scanHits += "$($_.Name) <- $n" }
@@ -197,7 +205,7 @@ if ($driftHits) {
 }
 
 if ($scanHits) {
-  Write-Host '违规：包内文档出现了 THIRD_PARTY_NOTICES 里列出的名称（除该文件自身）：' -ForegroundColor Red
+  Write-Host '违规：包内文档出现了 THIRD_PARTY_NOTICES 里列出的名称（除许可文件）：' -ForegroundColor Red
   $scanHits | Select-Object -Unique | ForEach-Object { Write-Host "  $_" }
   Write-Host '按仓库约定，对外文档只能写「上游开源来源（见 THIRD_PARTY_NOTICES）」。' -ForegroundColor Red
   exit 1

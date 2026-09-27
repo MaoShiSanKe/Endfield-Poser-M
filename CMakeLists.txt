@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # MSVC：源码含 UTF-8 中文注释/字符串，缺 /utf-8 时 GBK 误读会把
 # 行尾字节解析成反斜杠续行符，导致下一行被吞（C2046 等假错误）。
 if(MSVC)
-  add_compile_options(/utf-8)
+  add_compile_options(/utf-8 /bigobj)
   # The game ships MSVCP140 14.29; newer constexpr mutex initialization is
   # incompatible with that private runtime. Keep the legacy initialization ABI.
   add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
@@ -17,6 +17,28 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ---- 插件 DLL + 代理 DLL（仅 Windows/MSVC；沙箱 Linux 跳过）----
 if(WIN32)
+  enable_language(C)
+  file(GLOB CLOTH_DECODER_SOURCES CONFIGURE_DEPENDS
+    deps/brotli/c/common/*.c deps/brotli/c/dec/*.c)
+  add_library(cloth_decoder STATIC ${CLOTH_DECODER_SOURCES})
+  target_include_directories(cloth_decoder PUBLIC deps/brotli/c/include)
+  target_compile_definitions(cloth_decoder PUBLIC BROTLI_STATIC)
+  add_executable(cloth_resources src/build/cloth_resources.cpp)
+  target_compile_definitions(cloth_resources PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN)
+  file(GLOB_RECURSE CLOTH_RESOURCE_INPUTS CONFIGURE_DEPENDS
+    assets/cloth/*.bin assets/cloth/*.bundle src/cloth/generated/*.h
+    src/cloth/resources/*.h src/build/cloth_resources.h)
+  set(CLOTH_RESOURCE_OUTPUTS)
+  foreach(id RANGE 4303 4314)
+    list(APPEND CLOTH_RESOURCE_OUTPUTS "${CMAKE_CURRENT_SOURCE_DIR}/build/cloth/resources/${id}.bin")
+  endforeach()
+  add_custom_command(OUTPUT ${CLOTH_RESOURCE_OUTPUTS}
+    COMMAND $<TARGET_FILE:cloth_resources> --repo "${CMAKE_CURRENT_SOURCE_DIR}" --pack
+    DEPENDS cloth_resources ${CLOTH_RESOURCE_INPUTS} src/poser.rc
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" VERBATIM)
+  add_custom_target(cloth_payloads DEPENDS ${CLOTH_RESOURCE_OUTPUTS})
+  set_source_files_properties(src/poser.rc PROPERTIES OBJECT_DEPENDS "${CLOTH_RESOURCE_OUTPUTS}")
+
   # 主插件 DLL
   add_library(poser SHARED
     src/poser.cpp
@@ -31,7 +53,7 @@ if(WIN32)
     src/core/runtime_bootstrap.h src/core/runtime_lifetime.h src/core/runtime_shutdown.h src/core/plugin_paths.h src/core/proxy_loader.h
     src/game/mmd_audio.h src/math/mmd_audio_sync.h
     src/game/mmd_camera.h src/math/mmd_camera.h src/game/eye_gaze.h src/math/eye_gaze.h
-    src/math/cloth_state.h src/game/cloth.h src/game/cloth_anchor.h
+    src/math/cloth_state.h src/game/cloth.h src/game/cloth_init.h
     src/game/skeleton.h src/game/freeze.h src/game/accessory.h src/game/morph.h src/game/smc_morph.h src/game/smc_automation.h
     src/math/character_face.h src/math/face_geometry.h src/math/mmd_face_controls.h
     src/math/face_mixing.h
@@ -49,15 +71,16 @@ if(WIN32)
     deps/imguizmo/ImGuizmo.cpp
   )
   target_include_directories(poser PRIVATE
-    deps deps/imgui deps/imguizmo deps/minhook_lib/include deps/json src)
+    deps deps/imgui deps/imguizmo deps/minhook_lib/include deps/json src ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_definitions(poser PRIVATE
     APPLEPIE_PLUGIN_IMPL _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN
     IMGUI_DEFINE_MATH_OPERATORS _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
   # /EHa：让 __except 也能捕获 C++ 异常（IL2CPP 调用可能抛 0xe06d7363，
   # /EHsc 下这类异常会直接崩掉游戏进程）
   target_compile_options(poser PRIVATE /EHa)
+  target_link_options(poser PRIVATE /NODEFAULTLIB:LIBCMT)
   target_link_libraries(poser PRIVATE
-    d3d11 dxgi d3dcompiler dwmapi ole32
+    cloth_decoder d3d11 dxgi d3dcompiler dwmapi ole32
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/minhook_lib/lib/libMinHook.x64.lib)
 
   # 代理 DLL：本地编译 src/core/proxy_d3dcompiler.cpp，不再依赖上游编译产物
@@ -71,7 +94,12 @@ if(WIN32)
   set_target_properties(vulkan-1 PROPERTIES OUTPUT_NAME "vulkan-1")
 
   # 部署：把 poser.dll 与 d3dcompiler_47.dll 拷到 plugin/
-  add_dependencies(poser d3dcompiler_47 vulkan-1)
+  add_dependencies(poser d3dcompiler_47 vulkan-1 cloth_payloads)
+  add_custom_command(TARGET poser POST_BUILD
+    COMMAND $<TARGET_FILE:cloth_resources> --repo "${CMAKE_CURRENT_SOURCE_DIR}" --dll $<TARGET_FILE:poser>
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:cloth_resources>
+            ${CMAKE_CURRENT_SOURCE_DIR}/build/cloth_resources.exe
+    VERBATIM)
   add_custom_command(TARGET poser POST_BUILD
     COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/copy_character_faces.ps1
@@ -105,7 +133,7 @@ if(POSER_BUILD_TESTS)
     target_include_directories(${test_name} PRIVATE src deps/json deps/imgui deps/minhook_lib/include)
     if(MSVC)
       target_compile_options(${test_name} PRIVATE /EHa)
-      target_link_libraries(${test_name} PRIVATE d3d11
+      target_link_libraries(${test_name} PRIVATE cloth_decoder d3d11
         ${CMAKE_CURRENT_SOURCE_DIR}/deps/minhook_lib/lib/libMinHook.x64.lib)
     endif()
     add_test(NAME ${test_name} COMMAND ${test_name})

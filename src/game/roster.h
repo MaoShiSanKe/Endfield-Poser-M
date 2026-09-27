@@ -11,7 +11,7 @@
 //      角色模型 GameObject 形如 `chr_0009_azrila_postmodel(Clone)#27`，祖先里还有一级
 //      `#4670024589793050624_chr_0009_azrila`（实体根），组件里有 HGCharacterHelper /
 //      BipedIK / AnimatorMono。于是判据 = 自己名字以 chr_ 开头，或父链任意一级含 chr_。
-// 这一版把命中的角色连同父链、组件、以及"是不是当前捕获的那个"一起落盘（见文末 TODO）。
+// 命中的角色连同父链、组件和当前编辑状态一起保存到本地诊断文件。
 
 #include "core/game_hooks.h"
 #include "core/il2cpp_api.h"
@@ -102,7 +102,7 @@ static void ResolveRosterApi() {
 
   void *goClass = FindClass("UnityEngine", "GameObject", asms, ac);
   if (goClass) {
-    g_rosterGetComponent = FindMethod(goClass, "GetComponent", 1);
+    g_rosterGetComponent = FindComponentTypeQuery(goClass, "GetComponent", false);
     g_rosterGoActive = FindMethod(goClass, "get_activeInHierarchy", 0);
   }
   Log("[ROSTER] api: FindObjectsOfTypeAll=%p Animator=%p CharacterAnimationComponent=%p",

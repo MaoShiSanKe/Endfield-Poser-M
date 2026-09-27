@@ -10,7 +10,9 @@ Endfield Poser —— 第三方来源与许可声明
    本项目 `src/core/` 下的若干文件（`base.h`、`il2cpp_api.h`、`proxy_d3dcompiler.cpp`、
    `proxy_vulkan_full.cpp`、`gui_overlay.h`、`game_hooks.h`）由该项目的实现精简 / 改写而来；
    `src/` 中的 `AP_*` 导出沿用该项目的协议定义；`README.md` 的《用户协议与免责声明》
-   章节结构与措辞参考了该项目的 README。`src/game/cloth.h`、`cloth_anchor.h`、`smc_morph.h` 与冻结相关代码亦包含该项目的改写。
+   章节结构与措辞参考了该项目的 README。`src/game/cloth*.h`、`smc_morph.h` 与冻结相关代码亦包含该项目的改写。
+   服装增强、补骨与资源打包（`src/cloth/`、`src/build/`、`assets/cloth/`）
+   移植自该项目的 2bd3021；具体来源及修改范围见 `licenses/cloth-upstream.txt`。
    MMD 播放与生命周期修复移植自 OedoSoldier/Endfield-Poser（AGPL-3.0）；
    保留各源码文件中的来源注释。
 
@@ -35,9 +37,12 @@ Endfield Poser —— 第三方来源与许可声明
    - ImGuizmo 1.83（MIT）             https://github.com/CedricGuillemet/ImGuizmo
    - MinHook（BSD-2-Clause）          https://github.com/TsudaKageyu/minhook
    - nlohmann/json（MIT）             https://github.com/nlohmann/json
+   - Brotli（MIT）                    https://github.com/google/brotli
+
+   衣物资源读取包含 EndfieldStudio 衍生代码；来源与 MIT 许可见 `licenses/EndfieldStudio.txt`。
 
    其中 imgui 与 MinHook 的源码/静态库取自上述上游仓库中的同版本副本（许可同上）。
-   各依赖的许可全文见 `deps/<name>/LICENSE*`。
+   各依赖的许可全文见 `deps/<name>/LICENSE*` 与 `licenses/`；发布包保留这些许可。
 
 ——
 完整免责声明、内容合规与行为约束见仓库 README.md。

@@ -87,8 +87,8 @@ New-Item -ItemType Directory -Force -Path 'build\obj' | Out-Null
 $sdkIncFlags = ($sdkInc | ForEach-Object { '/I "' + $_ + '"' }) -join ' '
 $sdkLibFlags = '/LIBPATH:"' + $sdkLibDirUm + '" /LIBPATH:"' + $sdkLibDirUcrt + '"'
 
-$common = "/nologo /std:c++17 /O2 /bigobj /MD /EHa /utf-8 /Fo:build\obj\ /D_CRT_SECURE_NO_WARNINGS /DWIN32_LEAN_AND_MEAN /DIMGUI_DEFINE_MATH_OPERATORS /D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR $sdkIncFlags"
-$inc    = '/I deps /I deps\imgui /I deps\imguizmo /I deps\minhook_lib\include /I deps\json /I src'
+$common = "/nologo /std:c++17 /O2 /bigobj /Gy /Gw /MD /EHa /utf-8 /Fo:build\obj\ /D_CRT_SECURE_NO_WARNINGS /DWIN32_LEAN_AND_MEAN /DIMGUI_DEFINE_MATH_OPERATORS /D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR $sdkIncFlags"
+$inc    = '/DBROTLI_STATIC /I deps\brotli\c\include /I deps /I deps\imgui /I deps\imguizmo /I deps\minhook_lib\include /I deps\json /I src'
 
 function Invoke-NativeTool([string]$Executable, [string]$Arguments) {
   $info = New-Object System.Diagnostics.ProcessStartInfo
@@ -106,6 +106,18 @@ function Invoke-Cl([string]$CompileArgs) {
   Invoke-NativeTool $compiler $CompileArgs
 }
 
+Write-Host '=== Preparing embedded clothing resources ==='
+Invoke-Cl "$common $inc src\build\cloth_resources.cpp /Fe:build\cloth_resources.exe /link $sdkLibFlags"
+& '.\build\cloth_resources.exe' --repo $root --pack
+if ($LASTEXITCODE -ne 0) { throw 'Clothing resource packing failed' }
+New-Item -ItemType Directory -Force -Path 'build\obj\brotli' | Out-Null
+$decoderSources = @(Get-ChildItem -LiteralPath 'deps\brotli\c\common','deps\brotli\c\dec' -Filter '*.c' -File)
+foreach ($file in $decoderSources) {
+  Invoke-Cl ('/nologo /O2 /MD /c /TC /DBROTLI_STATIC /I deps\brotli\c\include /Fo:build\obj\brotli\' + $file.BaseName + '.obj "' + $file.FullName + '"')
+}
+$decoderObjects = (Get-ChildItem -LiteralPath 'build\obj\brotli' -Filter '*.obj' -File | ForEach-Object { '"' + $_.FullName + '"' }) -join ' '
+Invoke-NativeTool (Join-Path (Split-Path $compiler -Parent) 'lib.exe') ('/nologo /OUT:build\obj\cloth_decoder.lib ' + $decoderObjects)
+
 Write-Host '=== Compiling version resource ==='
 # cl 不处理 .rc；必须先用 rc.exe 编成 .res，再交给链接器
 # （Applepie Manager 用 GetFileVersionInfoA 读它显示插件版本）
@@ -122,12 +134,14 @@ if (-not (Test-Path 'build\obj\poser.res')) {
 Write-Host '=== Building poser.dll ==='
 $poserArgs = "$common /DAPPLEPIE_PLUGIN_IMPL $inc /LD " +
   'src\poser.cpp ' +
-  'build\obj\poser.res ' +
+  'build\obj\poser.res build\obj\cloth_decoder.lib ' +
   'deps\imgui\imgui.cpp deps\imgui\imgui_draw.cpp deps\imgui\imgui_tables.cpp deps\imgui\imgui_widgets.cpp ' +
   'deps\imgui\imgui_impl_dx11.cpp deps\imgui\imgui_impl_win32.cpp deps\imguizmo\ImGuizmo.cpp ' +
   '/Fe:plugin\poser.dll ' +
   "/link /NODEFAULTLIB:LIBCMT /MAP:plugin\poser.map $sdkLibFlags d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib ole32.lib deps\minhook_lib\lib\libMinHook.x64.lib"
 Invoke-Cl $poserArgs
+& '.\build\cloth_resources.exe' --repo $root --dll (Join-Path $root 'plugin\poser.dll')
+if ($LASTEXITCODE -ne 0) { throw 'Embedded clothing resource verification failed' }
 
 Write-Host ''
 Write-Host '=== Building d3dcompiler_47.dll (proxy) ==='
@@ -147,7 +161,7 @@ $tests = @(Get-ChildItem -LiteralPath 'tests' -Filter 'test_*.cpp' -File | Sort-
 })
 foreach ($t in $tests) {
   if (-not (Test-Path -LiteralPath $t.Src)) { throw "Missing local test source: $($t.Src)" }
-  Invoke-Cl "$common $inc `"$($t.Src)`" /Fe:build\tests\$($t.Name).exe /link $sdkLibFlags"
+  Invoke-Cl "$common $inc `"$($t.Src)`" /Fe:build\tests\$($t.Name).exe build\obj\cloth_decoder.lib /link $sdkLibFlags"
   & ".\build\tests\$($t.Name).exe"
   if ($LASTEXITCODE -ne 0) { throw "test $($t.Name) failed with exit $LASTEXITCODE" }
 }
