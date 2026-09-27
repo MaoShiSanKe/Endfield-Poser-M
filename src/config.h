@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
+#include "core/plugin_paths.h"
 
 void Log(const char *fmt, ...);
 
@@ -15,7 +16,12 @@ static int g_screenshotVK = VK_F8;      // 截图
 // 冻结 / 解冻：默认 P
 static int g_freezeVK = 'P';
 static bool g_freezeCtrl = false;
-static bool g_hotkeyConflict = false;   // 配置里还留着易冲突的裸功能键 → 面板给提示
+// MMD controls remain available when the overlay is hidden.
+static const int k_mmdHotkeyDefaults[4] = {VK_F5, VK_F6, VK_F7, VK_F8};
+static int g_mmdHotkeyVK[4] = {VK_F5, VK_F6, VK_F7, VK_F8};
+static bool g_mmdHotkeyCtrl[4] = {true, true, true, true};
+static const char *k_mmdHotkeyKeys[4] = {"mmd_play_key", "mmd_pause_key", "mmd_stop_key", "mmd_reset_key"};
+static bool g_hotkeyConflict = false;   // 配置里还留着易冲突的 F10~F12 → 面板给提示
 static char g_hotkeyConflictMsg[192] = "";
 static char g_hotkeyRiskyMsg[192] = ""; // 绑成单键（字母/数字…）→ 打字会误触发，提示
 static char g_defaultPoseDir[MAX_PATH] = "";
@@ -235,13 +241,12 @@ static void HotkeyDisplay(int vk, bool ctrl, char *buf, size_t sz) {
   snprintf(buf, sz, "%s%s", ctrl ? "Ctrl+" : "", n);
 }
 
-// 写回 plugin\poser_config.txt：只替换 <key>= 那一行，其它行原样保留；
-// 没有这一行就追加。热键与协议版本号都走它。
+// 面板里改键后写回 plugin\poser_config.txt：只替换对应那一行，其它行原样保留
 static bool SaveConfigValue(const char *keyName, const char *valueText) {
-  const char *path = "plugin\\poser_config.txt";
+  const auto path = PoserFilePath(L"poser_config.txt");
   static char lines[80][256];
   int count = 0;
-  FILE *f = fopen(path, "r");
+  FILE *f = _wfopen(path.c_str(), L"r");
   if (f) {
     while (count < 80 && fgets(lines[count], sizeof(lines[count]), f))
       count++;
@@ -266,7 +271,7 @@ static bool SaveConfigValue(const char *keyName, const char *valueText) {
   }
   if (!replaced && count < 80)
     snprintf(lines[count++], sizeof(lines[0]), "%s", newLine);
-  FILE *o = fopen(path, "wb");
+  FILE *o = _wfopen(path.c_str(), L"wb");
   if (!o)
     return false;
   for (int i = 0; i < count; i++)
@@ -286,7 +291,7 @@ static bool SaveHotkeyConfig(const char *keyName, int vk, bool ctrl) {
 
 // 往配置末尾追加一行（迁移标记用）
 static void AppendConfigLine(const char *line) {
-  FILE *f = fopen("plugin\\poser_config.txt", "ab");
+  FILE *f = OpenPoserFile(L"poser_config.txt", L"ab");
   if (!f)
     return;
   fwrite(line, 1, strlen(line), f);
@@ -299,10 +304,10 @@ static void AppendConfigLine(const char *line) {
 // 这里只迁移"值正好等于旧默认键"的那一项，且写一个标记行，之后不再重复迁移
 // （用户要是自己改回旧键，标记在，插件就不会再动它）。
 static void MigrateLegacyHotkeys() {
-  const char *path = "plugin\\poser_config.txt";
+  const auto path = PoserFilePath(L"poser_config.txt");
   static char lines[80][256];
   int count = 0;
-  FILE *f = fopen(path, "r");
+  FILE *f = _wfopen(path.c_str(), L"r");
   if (!f)
     return;
   while (count < 80 && fgets(lines[count], sizeof(lines[count]), f))
@@ -365,7 +370,7 @@ static void MigrateLegacyHotkeys() {
 static bool LoadPoserConfig() {
   ResolveDefaultPoseDir();
   MigrateLegacyHotkeys();
-  FILE *f = fopen("plugin\\poser_config.txt", "r");
+  FILE *f = OpenPoserFile(L"poser_config.txt", L"r");
   if (!f) return false;
   char line[512];
   while (fgets(line, sizeof(line), f)) {
@@ -386,6 +391,11 @@ static bool LoadPoserConfig() {
     else if (strcmp(key, "screenshot_key") == 0)  g_screenshotVK = ParseVK(val, VK_F8);
     else if (strcmp(key, "freeze_key") == 0)
       ParseHotkey(val, &g_freezeVK, &g_freezeCtrl, 'P', false);
+    else if (strncmp(key, "mmd_", 4) == 0) {
+      for (int i=0;i<4;++i)
+        if (strcmp(key,k_mmdHotkeyKeys[i])==0)
+          ParseHotkey(val,&g_mmdHotkeyVK[i],&g_mmdHotkeyCtrl[i],k_mmdHotkeyDefaults[i],true);
+    }
     else if (strcmp(key, "click_through") == 0)   g_clickThrough = (strtoul(val, nullptr, 0) != 0);
     else if (strcmp(key, "ik_enabled") == 0)      g_ikEnabled = (strtoul(val, nullptr, 0) != 0);
     else if (strcmp(key, "show_bone_params") == 0) g_showBoneParams = (strtoul(val, nullptr, 0) != 0);

@@ -1,9 +1,13 @@
 #pragma once
 
 #include <windows.h>
+#include <mutex>
+// Serialize GUI and HTTP pose access; recursive for shared control entrypoints.
+static std::recursive_mutex g_poseMutex;
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
+#include "plugin_paths.h"
 
 #include "core/version.h" // 版本号唯一来源（资源文件 src/poser.rc 也读它）
 
@@ -14,9 +18,9 @@
 static HANDLE g_logHandle = INVALID_HANDLE_VALUE;
 static CRITICAL_SECTION g_logLock;
 
-static void OpenLog(const char *path) {
+static void OpenLog(const wchar_t *path) {
   InitializeCriticalSection(&g_logLock);
-  g_logHandle = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+  g_logHandle = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (g_logHandle != INVALID_HANDLE_VALUE) {
     SetFilePointer(g_logHandle, 0, nullptr, FILE_END);

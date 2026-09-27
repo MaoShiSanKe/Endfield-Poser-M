@@ -1,5 +1,5 @@
 #pragma once
-#include "math/face_math.h"
+#include "math/mmd_retarget.h"
 #include <array>
 #include <cctype>
 
@@ -13,7 +13,7 @@ inline std::string Canonical(std::string s) {
   for(char &c:s)if(static_cast<unsigned char>(c)<128)c=char(std::tolower(static_cast<unsigned char>(c)));
   return s;
 }
-inline Vec3 Vector(const face_math::Matrix &m,Vec3 v) {
+inline Vec3 Vector(const mmd::Matrix &m,Vec3 v) {
   return {m.m[0]*v.x+m.m[4]*v.y+m.m[8]*v.z,
           m.m[1]*v.x+m.m[5]*v.y+m.m[9]*v.z,
           m.m[2]*v.x+m.m[6]*v.y+m.m[10]*v.z};
@@ -21,6 +21,6 @@ inline Vec3 Vector(const face_math::Matrix &m,Vec3 v) {
 struct Bone {
   std::string name;
   int parent=-1;
-  face_math::Matrix neutral,parentNeutral;
+  mmd::Matrix neutral,parentNeutral;
 };
 } // namespace face_geometry

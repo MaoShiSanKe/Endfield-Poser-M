@@ -22,3 +22,11 @@ docs/arp-ikfk-study.md
 docs/blender-bridge.md
 docs/superpowers/
 internal-docs/
+
+# Local regression fixtures and diagnostics are not release content.
+/tests/
+
+# The resource packer is source code, not generated build output.
+!src/build/
+!src/build/*.cpp
+!src/build/*.h

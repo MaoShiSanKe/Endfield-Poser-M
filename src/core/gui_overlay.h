@@ -22,7 +22,11 @@
 
 #include "base.h"
 #include "il2cpp_api.h"
+#include "frame_driver.h"
+#include "layered_readback.h"
+#include "overlay_device.h"
 #include "config.h"   // g_guiToggleVK / g_screenshotVK / 相机速度
+#include "user_agreement.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -30,19 +34,6 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
 // 由 poser.cpp / editor/gui.h 实现：每帧绘制主面板
 void DrawPoserGui();
 void GameFrameTick(); // poser.cpp 定义：每帧游戏逻辑（冻结维持/IK写回），隐藏时也跑
-// poser.cpp 定义：用户协议弹窗状态（详见 editor/panel_agreement.h）。
-// 没同意之前，面板不能只靠热键才显示 —— 那样用户根本看不到弹窗。
-bool TermsPending(); // 未同意、且用户没有点过「不同意并退出」
-void TermsReopen();  // 把弹窗叫回来（按面板热键时调用）
-void TermsDecline(); // 收起弹窗并保持惰性（按面板热键时调用）
-bool TermsReviewVisible(); // 已同意后从面板打开的「只读回看」窗口是否开着
-void TermsOpenReview();    // 打开回看窗口（面板里点「用户协议」时调用）
-void TermsCloseReview();   // 关闭回看窗口
-bool TermsWindowActive();  // 首次同意流程 或 回看窗口 —— 覆盖层据此决定吃不吃鼠标
-bool TermsDialogHovered(); // 指针是否落在协议窗口上
-bool LaunchTrusted();      // 启动方式是否可信（父进程是启动器 / XXMI）
-bool LaunchWarningVisible(); // 是否要显示"启动方式不对"的提示窗
-void DismissLaunchWarning(); // 关掉那条提示
 
 // 外部控制回调（poser.cpp 注册）：code 0=切模式 1=冻结/解冻 2=T-pose
 typedef void (*ExtControlFn)(int code);
@@ -59,21 +50,15 @@ static void SetGuiShutdownFn(void (*fn)()) { g_guiShutdownFn = fn; }
 static HWND g_gameHwnd = nullptr;
 static HWND g_guiHwnd = nullptr;
 
-// ---- 窗口布局 ----
-// 位置 / 尺寸 / 折叠状态由 ImGui 记到 plugin\poser_ui.ini（见下面 io.IniFilename）。
-// 「重置窗口位置」按钮删掉该文件，并把这一帧标记为"重排"：这一帧各窗口用
-// ImGuiCond_Always 回到默认位置，下一帧恢复 FirstUseEver（继续记录用户拖到哪）。
-static bool g_resetWindowLayout = false;
-static ImGuiCond LayoutCond() {
-  return g_resetWindowLayout ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
-}
-static void ResetWindowLayout() {
-  remove("plugin\\poser_ui.ini");
-  g_resetWindowLayout = true;
-  Log("[GUI] window layout reset to defaults");
+// 图钉：锁定所有面板窗口位置（拖火柴人/滑块时窗口不会跟着动）。
+// 放在这里是因为 poser.cpp 与 editor/panel_*.h 都要用它。
+static bool g_pinPanels = false;
+static int g_resetPanelLayoutFrames = 0;
+static ImGuiCond PanelPositionCondition() {
+  return g_resetPanelLayoutFrames > 0 ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
 }
 
-
+static ImGuiCond LayoutCond() { return PanelPositionCondition(); }
 // ---- 输入路由状态 ----
 // 鼠标只在「指针落在面板/旋转盘上 且 游戏光标已呼出」时由覆盖层吃掉，其余一律穿透给
 // 游戏（由 WM_NCHITTEST 决定）。游戏自带的 Alt 呼出光标通过 Cursor.lockState/visible
@@ -111,20 +96,18 @@ static void SetOverlayClickThrough(bool on) {
   Log("[INPUT] overlay click-through=%d", (int)on);
 }
 static volatile bool g_guiVisible = false;
-static volatile bool g_guiRunning = false;
-// GUI 线程是否已 attach 到 IL2CPP 域 —— 只有为 true 之后才允许碰游戏对象。
-// （见 GuiThread：先等窗口、再等域，最后才 attach。）
-static volatile bool g_guiAttached = false;
+static std::atomic<bool> g_guiRunning{false};
 static bool g_xxmiDetected = false; // 进程里发现第三方 d3d11.dll（XXMI/3DMigoto）
 
 // ---- 热键轮询线程 ----
 // GetAsyncKeyState 的 bit0 是"自上次调用以来按下过"的锁存位，**进程内任何一次同键调用
-// 都会把它清掉**：装了 XXMI/3DMigoto 后它们（以及游戏自己）也在轮询同一批按键，
-// 于是我们的 bit0 时有时无 —— 这正是"热键有时有用有时没用"的根因。
+// 都会把它清掉**：装了 XXMI/3DMigoto 后它们（以及游戏自己）也在轮询 F11/F12，
+// 于是我们的 bit0 时有时无 —— 这正是"F11 有时有用有时没用"的根因。
 // 这里改成独立线程 5ms 轮询 bit15（当前是否按下）+ 自己维护边沿，不依赖锁存位；
 // 也不怕 GUI 循环被分层回读/游戏卡顿拖慢而漏掉短按。
 static volatile LONG g_hotkeyToggleReq = 0;
 static volatile LONG g_hotkeyFreezeReq = 0;
+static volatile LONG g_mmdHotkeyRequests = 0;
 // 左键"短按"（不含拖动）计数：给"点空白处取消选中"用。因为覆盖层是可穿透的，
 // 点在远处空白处时这次点击根本不会进我们的窗口，只能靠轮询知道它发生过。
 static volatile LONG g_leftClickReq = 0;
@@ -136,6 +119,7 @@ static volatile LONG g_hotkeyCaptureCtrl = 0;
 
 static DWORD WINAPI HotkeyPollThread(LPVOID) {
   bool prevToggle = false, prevFreeze = false;
+  bool prevMmd[4] = {};
   bool prevLBtn = false;
   static bool prevAll[256] = {};
   int lastCapture = 0;
@@ -198,6 +182,7 @@ static DWORD WINAPI HotkeyPollThread(LPVOID) {
       // 捕获期间不触发正常热键
       prevToggle = (GetAsyncKeyState(g_guiToggleVK) & 0x8000) != 0;
       prevFreeze = (GetAsyncKeyState(g_freezeVK) & 0x8000) != 0;
+      for(int i=0;i<4;++i) prevMmd[i]=(GetAsyncKeyState(g_mmdHotkeyVK[i])&0x8000)!=0;
       Sleep(5);
       continue;
     }
@@ -206,6 +191,7 @@ static DWORD WINAPI HotkeyPollThread(LPVOID) {
     if (g_inputWantsText) {
       prevToggle = (GetAsyncKeyState(g_guiToggleVK) & 0x8000) != 0;
       prevFreeze = (GetAsyncKeyState(g_freezeVK) & 0x8000) != 0;
+      for(int i=0;i<4;++i) prevMmd[i]=(GetAsyncKeyState(g_mmdHotkeyVK[i])&0x8000)!=0;
       Sleep(5);
       continue;
     }
@@ -214,13 +200,18 @@ static DWORD WINAPI HotkeyPollThread(LPVOID) {
     HWND fg = GetForegroundWindow();
     bool ourFocus = (fg != nullptr) && (fg == g_gameHwnd || fg == g_guiHwnd);
     bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    for(int i=0;i<4;++i) {
+      bool pressed=(GetAsyncKeyState(g_mmdHotkeyVK[i])&0x8000)!=0 && (!g_mmdHotkeyCtrl[i] || ctrl);
+      if(poser_agreement::Allowed() && ourFocus && pressed && !prevMmd[i]) InterlockedOr(&g_mmdHotkeyRequests,1<<i);
+      prevMmd[i]=pressed;
+    }
     bool t = ourFocus && (GetAsyncKeyState(g_guiToggleVK) & 0x8000) != 0 &&
              (!g_guiToggleCtrl || ctrl);
     bool f = ourFocus && (GetAsyncKeyState(g_freezeVK) & 0x8000) != 0 &&
              (!g_freezeCtrl || ctrl);
     if (t && !prevToggle)
       InterlockedIncrement(&g_hotkeyToggleReq);
-    if (f && !prevFreeze)
+    if (poser_agreement::Allowed() && f && !prevFreeze)
       InterlockedIncrement(&g_hotkeyFreezeReq);
     prevToggle = t;
     prevFreeze = f;
@@ -300,13 +291,12 @@ static IDCompositionVisual *g_pDCompVisual = nullptr;
 // （表现为黑屏卡在开屏页）。
 // 故此采用 ImGui 画到离屏纹理，拷贝到 staging再由CPU 读回，最后 UpdateLayeredWindow 逐像素 alpha 渲染。
 static ID3D11Texture2D *g_pLayerTex = nullptr;      // 离屏渲染目标
-static ID3D11Texture2D *g_pLayerStaging = nullptr;  // CPU 可读副本（只按脏矩形大小建）
+static LayeredReadback g_layerReadback;
 static HDC g_layerDC = nullptr;                     // 与 DIB 关联的内存 DC
 static HBITMAP g_layerBmp = nullptr;                // 32bpp 顶朝下 DIB
 static HGDIOBJ g_layerOldBmp = nullptr;
 static void *g_layerBits = nullptr;
 static int g_layerW = 0, g_layerH = 0;
-static int g_blitW = 0, g_blitH = 0;                // staging/DIB 当前尺寸
 static int g_prevDirtyX = 0, g_prevDirtyY = 0;      // 上一帧上传到分层表面的矩形
 static int g_prevDirtyW = 0, g_prevDirtyH = 0;
 // 分层路径：内容没变就不回读/不上传（面板静止时能省掉绝大部分 GPU→CPU 等待）
@@ -314,6 +304,13 @@ static bool g_layerForcePresent = true;
 static unsigned long long g_layerLastHash = 0;
 static int g_layerLastX = -1, g_layerLastY = -1, g_layerLastW = 0,
            g_layerLastH = 0;
+static unsigned g_guiTraceMask = 0;
+static void TraceGuiStage(unsigned stage, const char *name) {
+  if (!(g_guiTraceMask & (1u << stage))) {
+    g_guiTraceMask |= 1u << stage;
+    Log("[GUI] first frame: %s (thread=%lu)", name, GetCurrentThreadId());
+  }
+}
 static double QpcMs(LARGE_INTEGER a, LARGE_INTEGER b) {
   static double freq = 0.0;
   if (freq == 0.0) {
@@ -351,26 +348,22 @@ static bool DetectForeignD3D11() {
   return found;
 }
 
-// 从 System32 取原版 D3D11CreateDevice，避开代理 d3d11.dll 的包装设备。
+// Use the verified, already loaded system module: LoadLibraryExW may be redirected.
 static PFN_D3D11_CREATE_DEVICE GetSystemD3D11CreateDevice() {
-  static PFN_D3D11_CREATE_DEVICE s_fn = nullptr;
-  if (s_fn)
-    return s_fn;
-  wchar_t path[MAX_PATH] = {};
-  GetSystemDirectoryW(path, MAX_PATH);
-  wcscat_s(path, MAX_PATH, L"\\d3d11.dll");
-  HMODULE m = LoadLibraryExW(path, nullptr, 0);
-  if (m)
-    s_fn = (PFN_D3D11_CREATE_DEVICE)GetProcAddress(m, "D3D11CreateDevice");
-  if (!s_fn)
-    Log("[GUI] WARN: system d3d11.dll unavailable, falling back to the "
-        "in-process import (may be a proxy!)");
-  return s_fn ? s_fn : &D3D11CreateDevice;
+  static OverlaySystemD3D11 system;
+  if (!system.create) {
+    system = LoadOverlaySystemD3D11();
+    if (!system.create)
+      Log("[GUI] system D3D11 verification failed (error=%lu); overlay disabled", system.error);
+    else
+      Log("[GUI] verified System32 D3D11 factory (module=%p)", system.module);
+  }
+  return system.create;
 }
 
 static void ReleaseLayerResources() {
   if (g_pMainRenderTargetView) { g_pMainRenderTargetView->Release(); g_pMainRenderTargetView = nullptr; }
-  if (g_pLayerStaging) { g_pLayerStaging->Release(); g_pLayerStaging = nullptr; }
+  g_layerReadback.Reset();
   if (g_pLayerTex) { g_pLayerTex->Release(); g_pLayerTex = nullptr; }
   if (g_layerDC) {
     if (g_layerOldBmp) SelectObject(g_layerDC, g_layerOldBmp);
@@ -380,36 +373,9 @@ static void ReleaseLayerResources() {
   }
   if (g_layerBmp) { DeleteObject(g_layerBmp); g_layerBmp = nullptr; }
   g_layerBits = nullptr;
-  g_blitW = g_blitH = 0;
   g_prevDirtyW = g_prevDirtyH = 0;
   g_layerW = g_layerH = 0;
-}
-
-// 只按"要上传的那块矩形"建 staging + DIB：整屏回读太贵（4K 每帧 33MB），
-// 面板通常只占屏幕一角，这里按脏矩形回读能把开销降一到两个数量级。
-static bool EnsureBlitResources(int w, int h) {
-  if (w <= 0 || h <= 0 || !g_pd3dDevice)
-    return false;
-  if (g_pLayerStaging && g_blitW == w && g_blitH == h)
-    return true;
-  if (g_pLayerStaging) { g_pLayerStaging->Release(); g_pLayerStaging = nullptr; }
-  g_blitW = g_blitH = 0;
-  D3D11_TEXTURE2D_DESC td = {};
-  td.Width = w;
-  td.Height = h;
-  td.MipLevels = 1;
-  td.ArraySize = 1;
-  td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-  td.SampleDesc.Count = 1;
-  td.Usage = D3D11_USAGE_STAGING;
-  td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-  if (FAILED(g_pd3dDevice->CreateTexture2D(&td, nullptr, &g_pLayerStaging))) {
-    Log("[GUI] layered: staging %dx%d failed", w, h);
-    return false;
-  }
-  g_blitW = w;
-  g_blitH = h;
-  return true;
+  g_layerForcePresent = true;
 }
 
 static bool CreateLayerResources(int w, int h) {
@@ -455,10 +421,15 @@ static bool CreateDeviceLayered(HWND hWnd) {
   D3D_FEATURE_LEVEL featureLevel;
   const D3D_FEATURE_LEVEL featureLevelArray[] = {D3D_FEATURE_LEVEL_11_0};
   PFN_D3D11_CREATE_DEVICE create = GetSystemD3D11CreateDevice();
-  HRESULT hr = create(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+  if (!create) return false;
+  // EFMI shares hardware-driver hooks with the game. Keep this small overlay
+  // on the software device; never silently fall back to the conflicting path.
+  D3D_DRIVER_TYPE driver = g_xxmiDetected ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE;
+  HRESULT hr = create(nullptr, driver, nullptr, 0,
                       featureLevelArray, 1, D3D11_SDK_VERSION,
                       &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
-  if (hr == DXGI_ERROR_UNSUPPORTED) {
+  if (hr == DXGI_ERROR_UNSUPPORTED && driver != D3D_DRIVER_TYPE_WARP) {
+    driver = D3D_DRIVER_TYPE_WARP;
     hr = create(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
                 featureLevelArray, 1, D3D11_SDK_VERSION,
                 &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
@@ -467,6 +438,12 @@ static bool CreateDeviceLayered(HWND hWnd) {
     Log("[GUI] layered: D3D11CreateDevice failed: 0x%08X", hr);
     return false;
   }
+  Log("[GUI] layered device: %s", driver == D3D_DRIVER_TYPE_WARP ? "WARP (software)" : "hardware");
+  if (!OverlayDeviceIsUnwrapped(g_pd3dDevice, g_pd3dDeviceContext)) {
+    Log("[GUI] layered device is still wrapped by a graphics proxy; overlay disabled before drawing");
+    return false;
+  }
+  Log("[GUI] layered device/context methods verified: no proxy wrapper");
   RECT rc;
   GetClientRect(hWnd, &rc);
   if (!CreateLayerResources(rc.right - rc.left, rc.bottom - rc.top)) {
@@ -580,47 +557,23 @@ static void LayeredLogTiming(double copyMs, double mapMs, double ulwMs, int w,
   }
 }
 
-static void PresentLayered() {
-  // 注意：g_pLayerStaging 是"按脏矩形懒创建"的（见 EnsureBlitResources），
-  // 不能放在这里判空——否则它永远没机会被创建，表现为窗口显示了却什么都没有（面板看不见）。
-  if (!g_layerBits || !g_pLayerTex) {
-    static bool s_loggedNoRes = false;
-    if (!s_loggedNoRes) {
-      s_loggedNoRes = true;
-      Log("[GUI] layered: resources not ready (bits=%p tex=%p) -> nothing drawn",
-          g_layerBits, g_pLayerTex);
-    }
-    return;
-  }
-  int dx = 0, dy = 0, dw = 0, dh = 0;
-  if (!LayeredDirtyRect(dx, dy, dw, dh)) {
-    LayeredLogTiming(0, 0, 0, 0, 0, 1); // 没内容可画：不碰窗口
-    return;
-  }
-  // 内容和矩形都没变 → 直接跳过（分层表面已经是对的），省掉这次 Map 等 GPU 的时间
-  unsigned long long hash = ImGuiContentHash();
-  if (!g_layerForcePresent && hash == g_layerLastHash && dx == g_layerLastX &&
-      dy == g_layerLastY && dw == g_layerLastW && dh == g_layerLastH) {
-    LayeredLogTiming(0, 0, 0, dw, dh, 1);
-    return;
-  }
-  g_layerLastHash = hash;
-  g_layerLastX = dx;
-  g_layerLastY = dy;
-  g_layerLastW = dw;
-  g_layerLastH = dh;
-  g_layerForcePresent = false;
-  if (!EnsureBlitResources(dw, dh))
-    return;
+static bool PollLayeredFrame() {
+  if (!g_layerReadback.Pending()) return true;
+  const LayeredFrame frame = g_layerReadback.Frame();
+  const int dx=frame.x, dy=frame.y, dw=frame.width, dh=frame.height;
   LARGE_INTEGER t0, t1, t2, t3;
   QueryPerformanceCounter(&t0);
-  D3D11_BOX box = {(UINT)dx, (UINT)dy, 0, (UINT)(dx + dw), (UINT)(dy + dh), 1};
-  g_pd3dDeviceContext->CopySubresourceRegion(g_pLayerStaging, 0, 0, 0, 0,
-                                             g_pLayerTex, 0, &box);
+  TraceGuiStage(5, "poll readback");
   D3D11_MAPPED_SUBRESOURCE map = {};
-  if (FAILED(g_pd3dDeviceContext->Map(g_pLayerStaging, 0, D3D11_MAP_READ, 0,
-                                      &map)))
-    return;
+  HRESULT hr = g_layerReadback.TryMap(g_pd3dDeviceContext, map);
+  if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return false;
+  if (FAILED(hr)) {
+    static HRESULT lastError=S_OK;
+    if (hr != lastError) Log("[GUI] layered: readback failed 0x%08X", hr);
+    lastError=hr;
+    g_layerForcePresent=true;
+    return true;
+  }
   QueryPerformanceCounter(&t1);
   const size_t srcPitch = (size_t)map.RowPitch;
   const size_t dstPitch = (size_t)g_layerW * 4; // DIB 是整窗宽度
@@ -628,7 +581,7 @@ static void PresentLayered() {
   for (int y = 0; y < dh; y++)
     memcpy((char *)g_layerBits + dstPitch * (dy + y) + (size_t)dx * 4,
            (const char *)map.pData + srcPitch * y, rowBytes);
-  g_pd3dDeviceContext->Unmap(g_pLayerStaging, 0);
+  g_layerReadback.Finish();
   QueryPerformanceCounter(&t2);
 
   RECT wr;
@@ -648,9 +601,46 @@ static void PresentLayered() {
   info.pblend = &bf;
   info.dwFlags = ULW_ALPHA;
   info.prcDirty = &dirty; // 只更新这块区域（位置/尺寸不受影响）
-  UpdateLayeredWindowIndirect(g_guiHwnd, &info);
+  TraceGuiStage(6, "upload layered window");
+  if (UpdateLayeredWindowIndirect(g_guiHwnd, &info)) {
+    // Only a successful upload may suppress a subsequent retry.
+    g_layerLastHash = frame.hash;
+    g_layerLastX = dx; g_layerLastY = dy;
+    g_layerLastW = dw; g_layerLastH = dh;
+    g_layerForcePresent = false;
+    TraceGuiStage(7, "layered upload complete");
+  } else {
+    static DWORD lastError=ERROR_SUCCESS;
+    DWORD error=GetLastError();
+    if (lastError != error) Log("[GUI] layered: upload failed error=%lu", error);
+    lastError=error;
+    g_layerForcePresent=true;
+  }
   QueryPerformanceCounter(&t3);
   LayeredLogTiming(QpcMs(t0, t1), QpcMs(t1, t2), QpcMs(t2, t3), dw, dh, 0);
+  return true;
+}
+
+static void PresentLayered() {
+  if (!g_layerBits || !g_pLayerTex || g_layerReadback.Pending()) return;
+  LayeredFrame frame;
+  if (!LayeredDirtyRect(frame.x, frame.y, frame.width, frame.height)) return;
+  frame.hash = ImGuiContentHash();
+  if (!g_layerForcePresent && frame.hash == g_layerLastHash &&
+      frame.x == g_layerLastX && frame.y == g_layerLastY &&
+      frame.width == g_layerLastW && frame.height == g_layerLastH) {
+    LayeredLogTiming(0, 0, 0, frame.width, frame.height, 1);
+    return;
+  }
+  TraceGuiStage(4, "submit readback");
+  HRESULT hr = g_layerReadback.Queue(g_pd3dDeviceContext, g_pLayerTex, frame);
+  if (FAILED(hr)) {
+    static HRESULT lastError=S_OK;
+    if (lastError != hr) Log("[GUI] layered: queue failed 0x%08X", hr);
+    lastError=hr;
+    return;
+  }
+  PollLayeredFrame();
 }
 
 // 覆盖层尺寸跟随游戏窗口后，分层纹理需要同步重建。
@@ -812,18 +802,9 @@ static LRESULT CALLBACK GuiWndProc(HWND hWnd, UINT msg, WPARAM wParam,
   // HTTRANSPARENT，点击与移动直接落给游戏（面板开着也能转镜头、走位）。
   // 拖拽中强制吃：否则松开左键的消息会丢给游戏，手柄会卡在拖拽态。
   if (msg == WM_NCHITTEST) {
-    // 协议弹窗是模态的：此时 GameFrameTick 还没跑过（未同意前不碰游戏），g_cursorFreeNow
-    // 永远是初值假 → 下面那套判断恒假 → 命中测试返回 HTTRANSPARENT，点击在到达 ImGui
-    // 之前就被转给游戏（日志里表现为 "mouse route -> game"），弹窗就点不动。
-    //
-    // 但只在**指针落在协议窗口上**时才吃：整块屏幕都吃会把游戏自己的菜单/退出按钮
-    // 一起吞掉，游戏会变得点不动、退不出去（实测踩过）。拖拽中要继续吃，
-    // 否则拉滚动条时松键消息会丢给游戏。
-    bool take = TermsWindowActive()
-                    ? (TermsDialogHovered() || g_inputMouseHeld)
-                    : (g_guiVisible &&
-                       (g_inputDragging || g_inputMouseHeld ||
-                        (g_cursorFreeNow && (g_inputTakeMouse || g_inputHoverGizmo))));
+    bool take = g_guiVisible &&
+                (g_inputDragging || g_inputMouseHeld ||
+                 (g_cursorFreeNow && (g_inputTakeMouse || g_inputHoverGizmo)));
     int route = take ? 1 : 0;
     if (route != g_inputRouteLogged) {
       g_inputRouteLogged = route;
@@ -831,9 +812,6 @@ static LRESULT CALLBACK GuiWndProc(HWND hWnd, UINT msg, WPARAM wParam,
     }
     return take ? HTCLIENT : HTTRANSPARENT;
   }
-  // 协议弹窗期间收到左键：用来确认点击是否真的到达了覆盖层（排查"点不动"用）
-  if (msg == WM_LBUTTONDOWN && TermsWindowActive())
-    Log("[INPUT] LMB down while the agreement dialog is up");
   if (msg == WM_LBUTTONDOWN)
     g_inputMouseHeld = true;
   else if (msg == WM_LBUTTONUP)
@@ -864,7 +842,7 @@ static LRESULT CALLBACK GuiWndProc(HWND hWnd, UINT msg, WPARAM wParam,
     ShowWindow(hWnd, SW_HIDE);
     g_guiVisible = false;
     return 0;
-  case WM_APP + 1: // 外部控制：切换面板显示（PostMessage 通道，普通窗口消息）
+  case WM_APP + 1: // 外部控制：切换面板显示（PostMessage 通道，绕过反作弊输入拦截）
     g_guiVisible = !g_guiVisible;
     Log("[CTRL] external toggle -> %d", (int)g_guiVisible);
     return 0;
@@ -876,59 +854,21 @@ static LRESULT CALLBACK GuiWndProc(HWND hWnd, UINT msg, WPARAM wParam,
   return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
-// 加载界面字体：ImGui 的「常用简体字」表 + 界面实际用到的补字。
-// 单独写成函数是必须的：GuiThread 里有 __try，函数内不能出现带析构的对象
-// （MSVC C2712），而 ImFontGlyphRangesBuilder / ImVector 都有析构。
-static void AddUiFont(ImGuiIO &io) {
-  ImFontConfig fontCfg;
-  fontCfg.OversampleH = 2;
-  fontCfg.OversampleV = 1;
-  fontCfg.PixelSnapH = true;
-  // 常用字表是 2500 字，不含一部分界面用字 ——「骼」（骨骼）、「瞬」、「Φ」（参数）、
-  // 「账」「钮」（协议弹窗）、「崩」（启动方式提示）都不在表内，缺了会渲染成方框。
-  // 改过界面文案后跑 tools\check_ui_font.ps1 对一遍，它就是拿这份表去比的。
-  static const char *kExtraUiChars = u8"骼瞬Φ账钮崩";
-  const char *fontPath = "C:\\Windows\\Fonts\\msyh.ttc";
-  if (GetFileAttributesA(fontPath) != INVALID_FILE_ATTRIBUTES) {
-    ImFontGlyphRangesBuilder builder;
-    builder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
-    builder.AddText(kExtraUiChars);
-    ImVector<ImWchar> ranges;
-    builder.BuildRanges(&ranges);
-    if (io.Fonts->AddFontFromFileTTF(fontPath, 18.0f, &fontCfg, ranges.Data))
-      return;
-  }
-  io.Fonts->AddFontDefault();
-  Log("[GUI] WARN: msyh.ttc not found, Chinese text may not render");
+static const ImWchar *PoserGlyphRanges(ImFontAtlas *atlas) {
+  static ImVector<ImWchar> glyphRanges;
+  ImFontGlyphRangesBuilder ranges;
+  ranges.AddRanges(atlas->GetGlyphRangesChineseSimplifiedCommon());
+  ranges.AddRanges(atlas->GetGlyphRangesJapanese());
+  ranges.BuildRanges(&glyphRanges);
+  return glyphRanges.Data;
 }
 
-// 游戏进程已经跑了多久（毫秒）。attach 需要一个"运行时确实起来了"的旁证：
-// 域指针非空并不代表 GC 的线程注册就绪，早一步就是
-// "Fatal error in GC / Collecting from unknown thread"（实测踩过两次）。
-static unsigned long long ProcessAgeMs() {
-  FILETIME c, e, k, u;
-  if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u))
-    return 0;
-  ULARGE_INTEGER ct;
-  ct.LowPart = c.dwLowDateTime;
-  ct.HighPart = c.dwHighDateTime;
-  FILETIME now;
-  GetSystemTimeAsFileTime(&now);
-  ULARGE_INTEGER nt;
-  nt.LowPart = now.dwLowDateTime;
-  nt.HighPart = now.dwHighDateTime;
-  return (nt.QuadPart - ct.QuadPart) / 10000ULL; // 100ns -> ms
-}
-
-static DWORD WINAPI GuiThread(LPVOID) {
-  // 【attach 时机很关键】先等 Unity 主窗口出现（最多 60 秒），再确认 IL2CPP 域就绪，
-  // 最后才 attach。GameAssembly.dll 加载 ≠ 运行时可用：在 GC 的线程注册就绪之前调用
-  // il2cpp_thread_attach 会直接把游戏打崩：
-  //   Fatal error in GC / Threads explicit registering is not previously enabled
-  // （实测踩过：玩家只会看到一个崩溃弹窗。）
-  // 游戏启动较慢：轮询等 Unity 主窗口出现，再回退任意窗口
+static DWORD GuiThreadBody(LPVOID) {
+  g_guiTraceMask = 0;
+  // Runtime registration is scoped to editor operations, never GPU/message waits.
+  // 游戏启动较慢：先轮询等 Unity 主窗口出现（最多 60 秒），再回退任意窗口
   g_gameHwnd = nullptr;
-  for (int i = 0; i < 60 && !g_gameHwnd; i++) {
+  for (int i = 0; i < 60 && !g_gameHwnd && g_guiRunning && !RuntimeClosing(); i++) {
     g_gameHwnd = FindGameHwnd();
     if (!g_gameHwnd)
       Sleep(1000);
@@ -938,49 +878,6 @@ static DWORD WINAPI GuiThread(LPVOID) {
   if (!g_gameHwnd) {
     Log("[GUI] No game hwnd, GUI thread exits");
     return 0;
-  }
-  // 窗口已经有了，再等域真正就绪；30 秒还不行就干脆不加载（不 attach、不崩游戏）。
-  //
-  // 另外：启动方式不可信（直启游戏）时**根本不 attach** —— 那种情况下运行时的就绪
-  // 时机无法判断，attach 早一步就是 "Fatal error in GC"，玩家只会看到崩溃弹窗。
-  // GUI 线程照常起来，由面板提示玩家改用启动器/XXMI。
-  if (!LaunchTrusted()) {
-    Log("[GUI] launch source not trusted -> skip IL2CPP attach; plugin stays inert");
-  } else if (il2cpp_domain_get && il2cpp_thread_attach) {
-    void *domain = nullptr;
-    for (int i = 0; i < 60 && !domain; i++) {
-      domain = il2cpp_domain_get();
-      if (!domain)
-        Sleep(1000);
-    }
-    if (!domain) {
-      Log("[GUI] IL2CPP domain not ready after 60s -> overlay disabled (请通过游戏启动器启动)");
-      return 0;
-    }
-    Log("[GUI] domain ready at process age %llu ms; waiting for assemblies + grace",
-        ProcessAgeMs());
-    // 再确认程序集已经加载（比"域指针非空"更靠后的一步）
-    for (int i = 0; i < 40; i++) {
-      size_t ac = 0;
-      void **asms = il2cpp_domain_get_assemblies(domain, &ac);
-      if (asms && ac > 0)
-        break;
-      Sleep(500);
-    }
-    // 宽限期：进程太年轻就再等（GC 线程注册通常在启动后十几秒内完成）。
-    // 目标：attach 时进程至少活了 20 秒，且域出现后再过 5 秒。
-    const unsigned long long kMinAgeMs = 20000ULL;
-    for (int i = 0; i < 60; i++) {
-      unsigned long long age = ProcessAgeMs();
-      if (age >= kMinAgeMs)
-        break;
-      Sleep(500);
-    }
-    Sleep(5000);
-    Log("[GUI] attaching to IL2CPP domain at process age %llu ms", ProcessAgeMs());
-    il2cpp_thread_attach(domain);
-    g_guiAttached = true; // 之后 poser.cpp 才允许碰游戏对象
-    Log("[GUI] attached to IL2CPP domain (age %llu ms)", ProcessAgeMs());
   }
   WNDCLASSEXW wc = {};
   wc.cbSize = sizeof(wc);
@@ -1057,9 +954,12 @@ static DWORD WINAPI GuiThread(LPVOID) {
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGuiIO &io = ImGui::GetIO();
-  // 窗口位置/折叠状态记在插件自己的目录里（不往游戏根目录丢 imgui.ini）。
-  // 想回到默认布局：主面板「重置窗口位置」按钮（删掉这个文件并重排一次）。
-  io.IniFilename = "plugin\\poser_ui.ini";
+  static char layoutPath[MAX_PATH] = {};
+  GetModuleFileNameA(GetModuleHandleA("poser.dll"), layoutPath, MAX_PATH);
+  char *layoutSlash = strrchr(layoutPath, '\\');
+  if (layoutSlash) strcpy_s(layoutSlash + 1, size_t(layoutPath + MAX_PATH - layoutSlash - 1), "poser_layout.ini");
+  io.IniFilename = layoutSlash ? layoutPath : "plugin/poser_layout.ini";
+  io.ConfigWindowsMoveFromTitleBarOnly = true;
   io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard; // 关键盘导航，避免输入框被自动聚焦
   io.MouseDrawCursor = false;
   ImGui::StyleColorsDark();
@@ -1072,19 +972,37 @@ static DWORD WINAPI GuiThread(LPVOID) {
   style.ScrollbarSize = 12.0f;
   style.GrabMinSize = 10.0f;
 
-  AddUiFont(io);
+  {
+    ImFontConfig fontCfg;
+    fontCfg.OversampleH = 2;
+    fontCfg.OversampleV = 1;
+    fontCfg.PixelSnapH = true;
+    const char *fontPath = "C:\\Windows\\Fonts\\msyh.ttc";
+    bool loaded = false;
+    if (GetFileAttributesA(fontPath) != INVALID_FILE_ATTRIBUTES) {
+      ImFont *f = io.Fonts->AddFontFromFileTTF(
+          fontPath, 18.0f, &fontCfg, PoserGlyphRanges(io.Fonts));
+      loaded = (f != nullptr);
+    }
+    if (!loaded) {
+      io.Fonts->AddFontDefault();
+      Log("[GUI] WARN: msyh.ttc not found, Chinese text may not render");
+    }
+  }
 
   ImGui_ImplWin32_Init(g_guiHwnd);
   ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
-  g_guiVisible = false;
+  g_guiVisible = !poser_agreement::Allowed();
   ShowWindow(g_guiHwnd, SW_HIDE);
   Log("[GUI] ImGui initialized, panel ready");
+  StartGameFrameDriver();
 
   MSG msg;
   ZeroMemory(&msg, sizeof(msg));
   bool s_panelShown = false;
-  while (g_guiRunning) {
+  ULONGLONG nextDrawTick=0;
+  while (g_guiRunning && !RuntimeClosing()) {
     if (g_extPollFn)
       g_extPollFn(); // 控制文件轮询（面板隐藏时也执行）
     while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
@@ -1099,32 +1017,13 @@ static DWORD WINAPI GuiThread(LPVOID) {
       break;
     }
 
+    ULONGLONG tickNow=GetTickCount64();
+
     // 快捷键：切换面板显示（由 HotkeyPollThread 边沿检测，见上方注释）
     if (TakeHotkeyToggle()) {
-      if (LaunchWarningVisible()) {
-        // 启动方式提示：按一下热键就关掉（插件本来就是停用状态）
-        DismissLaunchWarning();
-        g_guiVisible = false;
-      } else if (TermsReviewVisible()) {
-        // 回看窗口正开着：这一下当成「关闭回看」，面板保持打开
-        TermsCloseReview();
-        g_guiVisible = true;
-        Log("[LEGAL] terms review closed by hotkey");
-      } else if (TermsPending()) {
-        // 弹窗正开着：这一下当成"收起"，插件保持惰性 —— 给用户一条随时把游戏
-        // 拿回来的退路（再按一次会把弹窗叫回来）。
-        TermsDecline();
-        g_guiVisible = false;
-        Log("[LEGAL] dialog dismissed by hotkey -> plugin stays inert (press again to re-open)");
-      } else {
-        g_guiVisible = !g_guiVisible;
-        TermsReopen(); // 之前收起/点过「不同意」→ 按热键把协议弹窗叫回来
-        Log("[GUI] toggle -> visible=%d", (int)g_guiVisible);
-      }
+      g_guiVisible = !g_guiVisible;
+      Log("[GUI] toggle -> visible=%d", (int)g_guiVisible);
     }
-    // 协议没同意前强制显示覆盖层：面板默认是关着的，不强制用户就看不到弹窗。
-    if (TermsPending() || TermsReviewVisible() || LaunchWarningVisible())
-      g_guiVisible = true;
 
     // 只有「面板打开 且 按住 Alt」时才把覆盖层显示出来（此时它接管鼠标/键盘）。
     // 其余时间窗口直接隐藏：既不渲染也不参与命中测试，游戏拿到全部输入。
@@ -1134,7 +1033,7 @@ static DWORD WINAPI GuiThread(LPVOID) {
     // click_through 模式：面板打开就常驻显示，靠分层穿透把鼠标让给游戏；
     // 默认模式：只有按住 Alt（或拖拽中）才显示覆盖层，其余时间整窗隐藏。
     bool shouldShow = g_guiVisible && !IsIconic(g_gameHwnd) &&
-                      (g_clickThrough || altHeld || g_inputDragging);
+                      (g_clickThrough || altHeld || g_inputDragging || !poser_agreement::Allowed());
     static int s_showLogged = -1;
     if ((int)shouldShow != s_showLogged) {
       s_showLogged = (int)shouldShow;
@@ -1182,12 +1081,12 @@ static DWORD WINAPI GuiThread(LPVOID) {
     }
     if (!s_panelShown) {
       // 隐藏覆盖层时仍跑游戏逻辑（冻结维持/IK写回/控制文件）
-      __try { GameFrameTick(); } __except (1) {
-        Log("[GUI] hidden GameFrameTick exception");
-      }
-      Sleep(30);
+      Sleep(1);
       continue;
     }
+
+    if(tickNow<nextDrawTick) { Sleep(1); continue; }
+    nextDrawTick=tickNow + (g_layeredOverlay && g_overlayFps>0 ? (ULONGLONG)(std::max)(1,1000/g_overlayFps) : 16);
 
     // 覆盖层是 NOACTIVATE，ImGui 的 Win32 后端只在"窗口获得焦点"时才轮询
     // GetCursorPos；而我们把非面板区域的鼠标消息让给了游戏，WM_MOUSEMOVE 不会
@@ -1198,8 +1097,13 @@ static DWORD WINAPI GuiThread(LPVOID) {
       if (::GetCursorPos(&mp) && ::ScreenToClient(g_guiHwnd, &mp))
         ImGui::GetIO().AddMousePosEvent((float)mp.x, (float)mp.y);
     }
-    if (g_layeredOverlay)
+    if (g_layeredOverlay) {
       LayeredSyncSize();
+      // A pending copy owns its source frame/rectangle. Keep servicing messages
+      // and hotkeys, but do not queue more GPU work until it can be read.
+      if (!PollLayeredFrame()) continue;
+    }
+    TraceGuiStage(0, "begin ImGui frame");
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -1207,7 +1111,6 @@ static DWORD WINAPI GuiThread(LPVOID) {
     __try { DrawPoserGui(); } __except (1) {
       Log("[GUI] DrawPoserGui exception code=0x%X", GetExceptionCode());
     }
-    g_resetWindowLayout = false; // 重排只生效一帧
 
     // ---- 输入路由 + 文字输入焦点 ----
     {
@@ -1217,19 +1120,7 @@ static DWORD WINAPI GuiThread(LPVOID) {
       // 面板/关节/旋转环上（或正在拖拽）时才关掉穿透，把这次交互留给覆盖层。
       // 放在这里（DrawPoserGui 之后）是关键：用的是**本帧**的 hover 状态，
       // 快一帧都不行 —— 否则快速移到旋转环上立刻点击，那一下会被判成点游戏。
-      // 协议弹窗期间是模态的：此时 GameFrameTick 还没跑过（未同意前它不碰游戏），
-      // g_cursorFreeNow 一直是初值，下面那套"光标自由 + 悬停交互项才接管"的判断
-      // 会恒为假 —— 表现就是弹窗看得见但点不动。这里直接接管鼠标。
-      if (TermsWindowActive()) {
-        // 只在指针落在弹窗上时才接管鼠标；其它地方保持穿透，游戏照常可点。
-        SetOverlayClickThrough(!(TermsDialogHovered() || g_inputMouseHeld));
-        // 游戏平时会把系统光标藏起来（鼠标锁在窗口里转视角）。藏了就补一个软光标，
-        // 用户按游戏自带的 Alt 呼出光标后，这个软光标就让位给真光标。
-        CURSORINFO ci;
-        ci.cbSize = sizeof(ci);
-        bool osShown = GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) != 0;
-        io.MouseDrawCursor = !osShown;
-      } else if (g_clickThrough) {
+      if (g_clickThrough) {
         bool overInteractive = g_inputTakeMouse || g_inputHoverGizmo ||
                                g_inputDragging || g_inputMouseHeld;
         SetOverlayClickThrough(!(g_cursorFreeNow && overInteractive));
@@ -1254,28 +1145,25 @@ static DWORD WINAPI GuiThread(LPVOID) {
     }
 
     ImGui::Render();
+    TraceGuiStage(1, "set and clear render target");
     const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     g_pd3dDeviceContext->OMSetRenderTargets(1, &g_pMainRenderTargetView,
                                              nullptr);
     g_pd3dDeviceContext->ClearRenderTargetView(g_pMainRenderTargetView,
                                                 clear_color);
+    TraceGuiStage(2, "render ImGui draw data");
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    TraceGuiStage(3, "ImGui draw complete");
     if (g_layeredOverlay) {
       PresentLayered();
-      // 分层路径没有垂直同步：按 overlay_fps 限帧（0=不限）。
-      // mod 多的机器上，回读等待本来就长，帧率越低对游戏干扰越小。
-      DWORD waitMs = 8;
-      if (g_overlayFps > 0) {
-        int ms = 1000 / g_overlayFps;
-        waitMs = (DWORD)(ms < 1 ? 1 : ms);
-      }
-      Sleep(waitMs);
+      // Pose updates run on the game callback / independent fallback.
     } else {
       g_pSwapChain->Present(0, 0);
     }
   }
 
   Log("[GUI] Shutting down...");
+  StopGameFrameDriver();
   if (g_guiShutdownFn) {
     __try {
       g_guiShutdownFn(); // 解冻 + 恢复物理/表情，避免禁用插件后布料一直僵着
@@ -1291,8 +1179,22 @@ static DWORD WINAPI GuiThread(LPVOID) {
   return 0;
 }
 
+static DWORD WINAPI GuiThread(LPVOID arg) {
+  try {
+    Log("[GUI] runtime registration scoped to editor operations");
+    return GuiThreadBody(arg);
+  } catch (...) {
+    Log("[GUI] native thread interrupted; releasing runtime registration");
+    g_guiRunning = false;
+    g_hotkeyPollRun = 0;
+    StopGameFrameDriver();
+    if (g_guiShutdownFn) g_guiShutdownFn();
+    return 0;
+  }
+}
+
 static void StartGuiThread() {
-  if (g_guiRunning) return;
+  if (RuntimeClosing() || g_guiRunning) return;
   g_guiRunning = true;
   if (!g_hotkeyPollRun) {
     g_hotkeyPollRun = 1;

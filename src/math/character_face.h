@@ -23,7 +23,7 @@ struct Profile {
 // PMX authors often use half-width katakana to fit VMD's 15-byte names.
 // Fold spelling only for lookup; keep original names for labels/manual maps.
 inline std::string MorphSpelling(std::string name) {
-  name=face_math::Name(std::move(name));
+  name=mmd::Name(std::move(name));
   auto replace=[&](const std::string &from,const std::string &to) {
     size_t at=0;
     while((at=name.find(from,at))!=name.npos){name.replace(at,from.size(),to);at+=to.size();}
@@ -39,7 +39,7 @@ inline std::string MorphSpelling(std::string name) {
   return name;
 }
 inline int FindMorph(const Profile &profile,const std::string &name) {
-  auto exact=profile.names.find(face_math::Name(name));
+  auto exact=profile.names.find(mmd::Name(name));
   if(exact!=profile.names.end())return exact->second;
   auto spelling=MorphSpelling(name);int found=-1;
   for(int i=0;i<int(profile.morphs.size());++i)if(MorphSpelling(profile.morphs[i].name)==spelling) {
@@ -78,7 +78,7 @@ inline Profile Read(const nlohmann::json &j) {
     p.bones.push_back(n);
   }
   for(const auto &v:morphs) {
-    Morph m;m.name=face_math::Name(v.at("name").get<std::string>());m.reason=v.value("reason",std::string{});
+    Morph m;m.name=mmd::Name(v.at("name").get<std::string>());m.reason=v.value("reason",std::string{});
     m.panel=v.value("panel",0);
     if(m.panel<0||m.panel>4)throw std::runtime_error("Invalid facial morph panel");
     m.supported=v.value("supported",false);m.residual=v.value("residual",1.f);
@@ -104,7 +104,7 @@ struct Binding {
   int matched=0,usableCount=0;
   float scale=0,error=0;
   std::string status;
-  face_math::Matrix basis;
+  mmd::Matrix basis;
   float handedness=1;
   std::vector<int> slots;
   std::vector<bool> usable;
@@ -190,18 +190,18 @@ inline bool Evaluate(const Profile &p,const Binding &b,const face_mixing::Hierar
   }
   // Reconstruct locals in the actual target hierarchy. Unmatched children keep
   // their local neutral pose and inherit their real parent's motion.
-  std::array<face_math::Matrix,face_geometry::MaxBones> matrices;
+  std::array<mmd::Matrix,face_geometry::MaxBones> matrices;
   std::array<Quat,face_geometry::MaxBones> rotations;
   out=h.rest;
   for(int n=0;n<h.count;++n) {
     int i=h.order[n],parent=h.parent[i];const auto &matrix=parent>=0?matrices[parent]:h.external[i];
     Quat rotation=parent>=0?rotations[parent]:h.externalRotation[i];
     if(controlled[i]) {
-      face_math::Matrix inverse;if(!face_math::Inverse(matrix,inverse))return false;
+      mmd::Matrix inverse;if(!mmd::Inverse(matrix,inverse))return false;
       out[i].position=face_geometry::Vector(inverse,desired[i].position)+inverse.position();
       out[i].rotation=NormQ(Conj(rotation)*desired[i].rotation);
     }
-    matrices[i]=matrix*face_math::TRS(out[i].position,out[i].rotation,h.scale[i]);
+    matrices[i]=matrix*mmd::TRS(out[i].position,out[i].rotation,h.scale[i]);
     rotations[i]=NormQ(rotation*out[i].rotation);
   }
   return true;

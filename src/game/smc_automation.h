@@ -24,7 +24,7 @@ static int SMCBooleanOffset(void *klass, const char *name) {
   return -1;
 }
 static bool SMCReadBoolean(void *object,int offset,bool &value) {
-  if (!object || offset<16 || SMCRuntimeClosing()) return false;
+  if (!object || offset<16 || RuntimeClosing()) return false;
   __try {
     unsigned char raw=*(unsigned char *)((char *)object+offset);
     if (raw>1) return false;
@@ -32,7 +32,7 @@ static bool SMCReadBoolean(void *object,int offset,bool &value) {
   } __except(1) {return false;}
 }
 static bool SMCWriteBoolean(void *object,int offset,bool value) {
-  if (!object || offset<16 || SMCRuntimeClosing()) return false;
+  if (!object || offset<16 || RuntimeClosing()) return false;
   __try {*(bool *)((char *)object+offset)=value;return true;}
   __except(1) {return false;}
 }
@@ -44,7 +44,7 @@ struct SMCAutomationPause {
   bool confirmed=false;
 
   bool live() const {
-    if (SMCRuntimeClosing() || !core || !animator || !il2cpp_gchandle_get_target) return false;
+    if (RuntimeClosing() || !core || !animator || !il2cpp_gchandle_get_target) return false;
     __try {
       return il2cpp_gchandle_get_target(coreHandle)==core &&
           il2cpp_gchandle_get_target(animatorHandle)==animator && UnityObjAlive(animator);
@@ -53,7 +53,7 @@ struct SMCAutomationPause {
   void release(bool restore=true) {
     if (restore && live())
       for (auto &field:fields) if(field.captured) SMCWriteBoolean(core,field.offset,field.original);
-    if (!SMCRuntimeClosing() && il2cpp_gchandle_free) {
+    if (!RuntimeClosing() && il2cpp_gchandle_free) {
       if(coreHandle)il2cpp_gchandle_free(coreHandle);
       if(animatorHandle)il2cpp_gchandle_free(animatorHandle);
     }
@@ -62,7 +62,7 @@ struct SMCAutomationPause {
   }
   void update(void *current,void *owner,bool hold,bool verified) {
     if (!hold || !verified || core!=current || animator!=owner) release();
-    if (!hold || !verified || !current || !owner || SMCRuntimeClosing()) return;
+    if (!hold || !verified || !current || !owner || RuntimeClosing()) return;
     if (!core) {
       if (!UnityObjAlive(owner) || !il2cpp_gchandle_new || !il2cpp_gchandle_free ||
           !il2cpp_gchandle_get_target || !il2cpp_object_get_class) return;

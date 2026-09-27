@@ -14,3 +14,9 @@ overlay_fps=60
 ik_enabled=0
 # 姿态预设目录（相对游戏根目录，或绝对路径）
 default_pose_dir=plugin\poses
+
+# MMD playback; change in the panel if needed.
+mmd_play_key=CTRL+F5
+mmd_pause_key=CTRL+F6
+mmd_stop_key=CTRL+F7
+mmd_reset_key=CTRL+F8

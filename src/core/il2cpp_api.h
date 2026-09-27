@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
+#include "runtime_lifetime.h"
 #include <windows.h>
 #include "MinHook.h"
 
@@ -12,6 +14,8 @@ void Log(const char *fmt, ...);
   static t_##name name = nullptr
 D(void *, il2cpp_domain_get);
 D(void *, il2cpp_thread_attach, void *);
+D(void *, il2cpp_thread_current);
+D(void, il2cpp_thread_detach, void *);
 D(void **, il2cpp_domain_get_assemblies, void *, size_t *);
 D(void *, il2cpp_assembly_get_image, void *);
 D(const char *, il2cpp_image_get_name, void *);
@@ -20,6 +24,8 @@ D(void *, il2cpp_image_get_class, void *, size_t);
 D(void *, il2cpp_class_get_methods, void *, void **);
 D(const char *, il2cpp_method_get_name, void *);
 D(uint32_t, il2cpp_method_get_param_count, void *);
+D(uint32_t, il2cpp_method_get_flags, void *, uint32_t *);
+D(int32_t, il2cpp_class_value_size, void *, uint32_t *);
 D(const char *, il2cpp_class_get_name, void *);
 D(const char *, il2cpp_class_get_namespace, void *);
 D(void *, il2cpp_object_get_class, void *);
@@ -33,7 +39,11 @@ D(int, il2cpp_field_get_flags, void *);
 D(void *, il2cpp_class_get_method_from_name, void *, const char *, int);
 D(void *, il2cpp_runtime_invoke, void *, void *, void **, void **);
 D(void *, il2cpp_class_get_parent, void *);
+D(void *, il2cpp_class_get_declaring_type, void *);
+D(void *, il2cpp_class_get_nested_types, void *, void **);
+D(void, il2cpp_field_set_value_object, void *, void *, void *);
 D(void, il2cpp_field_static_get_value, void *, void *);
+D(void, il2cpp_field_static_set_value, void *, void *);
 D(void *, il2cpp_field_get_type, void *);
 D(int, il2cpp_type_get_type, void *);
 D(void *, il2cpp_method_get_return_type, void *);
@@ -48,8 +58,6 @@ D(void *, il2cpp_array_new, void *, size_t);
 D(uint32_t, il2cpp_gchandle_new, void *, bool);
 D(void *, il2cpp_gchandle_get_target, uint32_t);
 D(void, il2cpp_gchandle_free, uint32_t);
-D(int32_t, il2cpp_class_value_size, void *, uint32_t *);
-D(uint32_t, il2cpp_method_get_flags, void *, uint32_t *);
 #undef D
 
 static HMODULE hGA = nullptr;
@@ -105,6 +113,8 @@ static bool Resolve() {
 #define R(n) n = (t_##n)GetProcAddress(hGA, #n)
   R(il2cpp_domain_get);
   R(il2cpp_thread_attach);
+  R(il2cpp_thread_current);
+  R(il2cpp_thread_detach);
   R(il2cpp_domain_get_assemblies);
   R(il2cpp_assembly_get_image);
   R(il2cpp_image_get_name);
@@ -113,6 +123,8 @@ static bool Resolve() {
   R(il2cpp_class_get_methods);
   R(il2cpp_method_get_name);
   R(il2cpp_method_get_param_count);
+  R(il2cpp_method_get_flags);
+  R(il2cpp_class_value_size);
   R(il2cpp_class_get_name);
   R(il2cpp_class_get_namespace);
   R(il2cpp_object_get_class);
@@ -125,7 +137,11 @@ static bool Resolve() {
   R(il2cpp_field_get_flags);
   R(il2cpp_runtime_invoke);
   R(il2cpp_class_get_parent);
+  R(il2cpp_class_get_declaring_type);
+  R(il2cpp_class_get_nested_types);
+  R(il2cpp_field_set_value_object);
   R(il2cpp_field_static_get_value);
+  R(il2cpp_field_static_set_value);
   R(il2cpp_field_get_type);
   R(il2cpp_type_get_type);
   R(il2cpp_method_get_return_type);
@@ -140,8 +156,6 @@ static bool Resolve() {
   R(il2cpp_gchandle_new);
   R(il2cpp_gchandle_get_target);
   R(il2cpp_gchandle_free);
-  R(il2cpp_class_value_size);
-  R(il2cpp_method_get_flags);
 #undef R
   return il2cpp_domain_get && il2cpp_class_get_methods &&
          il2cpp_method_get_name;
@@ -206,8 +220,59 @@ static bool Hook(void *mi, const char *l, void *d, void **o) {
   return true;
 }
 
+static std::atomic<bool> g_runtimeReady{false};
+static void *CurrentRuntimeThread() {
+  __try { return il2cpp_thread_current ? il2cpp_thread_current() : nullptr; }
+  __except (1) { return nullptr; }
+}
+
+// Endfield adds GetComponent<T>(int). Parameter count alone can choose it
+// before GetComponent(System.Type), silently returning no renderer.
+static bool MetadataClassIs(void *type,const char *space,const char *name) {
+  if(!type||!il2cpp_class_from_type||!il2cpp_class_get_name||!il2cpp_class_get_namespace)return false;
+  void *klass=il2cpp_class_from_type(type);if(!klass)return false;
+  const char *actualName=il2cpp_class_get_name(klass),*actualSpace=il2cpp_class_get_namespace(klass);
+  return actualName&&actualSpace&&!strcmp(actualName,name)&&!strcmp(actualSpace,space);
+}
+static void *FindComponentTypeQuery(void *klass,const char *name,bool multiple) {
+  if(!klass||!il2cpp_class_get_methods||!il2cpp_method_get_flags||!il2cpp_method_get_param||
+     !il2cpp_method_get_return_type||!il2cpp_method_get_param_count||!il2cpp_method_get_name)return nullptr;
+  void *iter=nullptr,*method;
+  while((method=il2cpp_class_get_methods(klass,&iter))) {
+    const char *actual=il2cpp_method_get_name(method);
+    if(!actual||strcmp(actual,name)||(il2cpp_method_get_flags(method,nullptr)&0x10)||il2cpp_method_get_param_count(method)!=1)continue;
+    if(MetadataClassIs(il2cpp_method_get_param(method,0),"System","Type")&&
+       MetadataClassIs(il2cpp_method_get_return_type(method),"UnityEngine",multiple?"Component[]":"Component"))return method;
+  }
+  return nullptr;
+}
+static void *AttachRuntimeThread() {
+  if (RuntimeClosing() || !g_runtimeReady.load(std::memory_order_acquire)) return nullptr;
+  __try {
+    if (!il2cpp_domain_get || !il2cpp_thread_attach || !il2cpp_thread_detach) return nullptr;
+    void *domain = il2cpp_domain_get();
+    return domain ? il2cpp_thread_attach(domain) : nullptr;
+  } __except (1) { return nullptr; }
+}
+static void DetachRuntimeThread(void *thread) {
+  __try { if (thread && !g_runtimeTornDown.load() && il2cpp_thread_detach) il2cpp_thread_detach(thread); }
+  __except (1) {}
+}
+struct RuntimeThreadScope {
+  void *owned = nullptr;
+  bool ready = false, admitted = false;
+  RuntimeThreadScope() {
+    if (!g_runtimeReady.load(std::memory_order_acquire) || !(admitted=g_runtimeAdmission.enter())) return;
+    ready = CurrentRuntimeThread() != nullptr;
+    if (!ready) { owned = AttachRuntimeThread(); ready = owned != nullptr; }
+  }
+  ~RuntimeThreadScope() { DetachRuntimeThread(owned); if(admitted) g_runtimeAdmission.leave(); }
+  RuntimeThreadScope(const RuntimeThreadScope &) = delete;
+  RuntimeThreadScope &operator=(const RuntimeThreadScope &) = delete;
+};
+
 static void *Invoke(void *method, void *obj, void **params = nullptr) {
-  if (!method)
+  if (!method || RuntimeClosing())
     return nullptr;
   __try {
     void *exc = nullptr;

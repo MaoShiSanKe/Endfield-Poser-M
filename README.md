@@ -1,7 +1,7 @@
 # Endfield Poser
 
 《明日方舟：终末地》的游戏内摆姿插件：把角色冻结在当前姿态，用 3D 旋转盘和参数面板直接摆姿势，
-保存 / 载入姿态预设，方便游戏内取景与后续参考。
+保存 / 载入姿态预设，也可播放 MMD 动作、表情、音乐和镜头。
 
 > ⚠️ 非官方第三方工具，与游戏厂商无关。使用前请先读文末的[用户协议与免责声明](#用户协议与免责声明)。
 
@@ -29,11 +29,13 @@
 > Vulkan 走 `vulkan-1.dll`，同时放着互不影响。
 
 1. 解压 → 双击包内 `安全安装.bat`（或按上面的表手动放置）；
-2. 用**官方启动器**或 **XXMI** 启动游戏，游戏用「窗口化 / 无边框全屏」；
+2. 用平时的启动方式（官方启动器或 EFMI / XXMI 等）进入游戏，游戏用「窗口化 / 无边框全屏」；
 3. 第一次进游戏会弹【用户协议与免责声明】：读完 → 点「同意并继续」；
 4. 按 `L` 呼出面板，`P` 冻结 / 解冻；面板点不到就按住 `Alt` 呼出游戏光标再点。
 
 热键可在面板顶部「快捷键（可改）」里改（自动写回配置，`Esc` 取消）；
+更新前完全退出游戏，再运行新版安装包中的向导。它会备份文件，保留配置、姿态和自定义校准。
+
 完整说明见[使用须知](docs/notice.md)，从安装到出片的流程见[图文教程](docs/tutorial.md)。
 
 ## 功能一览
@@ -44,6 +46,9 @@
 - **姿态预设**：命名保存 / 覆盖 / 载入 / 删除（含从骨数据）；保存位置可配置。
 - **表情**：面部 BlendShape + 游戏原生 SMC 表情，以"中性默认脸"为基准；冻结时保持当前表情。
 - **MMD 表情模式**：按眉毛、眼睛、嘴部和其他分类调节，支持搜索、叠加、整体强度和分组归零。内置角色专属映射，缺失时可选固定映射。用法见[教程](docs/tutorial.md#mmd-表情模式)。
+- **MMD 播放器**：VMD 动作、表情与眼神，支持逐帧、变速、循环、原地播放、音乐同步和镜头偏移。可选 PMX 骨架参考、手动 IK 与分部位幅度。[播放指南](docs/mmd-player.md)。
+- **眼睛朝向**：在表情面板调节方向，或让双眼自动看向镜头。
+- **衣物补骨与碰撞增强**：自动匹配支持的服装，补充可动骨骼与蒙皮，并提供地面碰撞和飘带减振；不匹配时保留原有物理。开关与限制见[衣物物理](docs/mmd-player.md#衣物物理)。
 - **多角色**：冻结状态按角色记忆，切回冻过的角色会恢复离开时的姿势。
 - **WebUI**：插件启动后监听 `http://127.0.0.1:18923`，可在浏览器里辅助操作。
 - **实验性**：IK 控制器（默认关，面板里可勾；骨骼跟随尚未完成）。
@@ -54,7 +59,11 @@
 
 ```
 gui_toggle_key=L          # 支持 L / CTRL+L / INSERT / 0x2D 这类写法
-freeze_key=P              # 冻结 / 解冻（写法同上）
+freeze_key=P              # 冻结 / 解冻（播放中先停止）
+mmd_play_key=CTRL+F5
+mmd_pause_key=CTRL+F6
+mmd_stop_key=CTRL+F7
+mmd_reset_key=CTRL+F8
 click_through=1           # 1=覆盖层常驻并真穿透（推荐）；0=按住 Alt 才显示面板
 overlay_mode=0            # 0=自动（检测到 XXMI/3DMigoto 时改用分层窗口）；1=强制 DComp；2=强制分层窗口
 overlay_fps=60            # 分层窗口路径的呈现帧率上限（0=不限；mod 多/机器吃紧可降到 30）
@@ -69,9 +78,9 @@ default_pose_dir=plugin\poses
 ### Windows（插件本体，MSVC）
 
 ```powershell
-# 本机（VS 18 Insiders、无 cmake、无系统 Windows SDK）：
-powershell -ExecutionPolicy Bypass -File tools\setup_winsdk.ps1   # 首次：拉取 Windows SDK 到 deps/（需联网）
-powershell -ExecutionPolicy Bypass -File tools\build_msvc.ps1     # 编译 plugin/ 并跑三个数学单测
+# 安装 MSVC x64 与 Windows SDK 后：
+powershell -ExecutionPolicy Bypass -File tools\build_msvc.ps1 -RunTests
+# 无系统 SDK 时，可先运行 tools\setup_winsdk.ps1
 
 # 有 cmake + VS 工具链时：
 build.bat
@@ -94,7 +103,7 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build
 endfield-poser/
 ├── CMakeLists.txt        # Windows: 插件 DLL + 代理 DLL；tests: 数学单测
 ├── build.bat             # 有 cmake 时的一键构建（否则回退 build_msvc.ps1）
-├── deps/                 # 自包含第三方：imgui / imguizmo / minhook_lib / json
+├── deps/                 # 随源码提供的依赖，许可见 THIRD_PARTY_NOTICES
 ├── packaging/            # 发布包里的安装说明与默认配置模板
 ├── tools/                # build_msvc.ps1、package_release.ps1、setup_winsdk.ps1 等
 ├── src/
@@ -185,7 +194,7 @@ endfield-poser/
   **king_time@foxmail.com**（或 [issue](https://github.com/honxi1/Endfield-Poser/issues) /
   文末交流群）联系作者，**收到通知后会第一时间处理（包括删除相关内容、停止分发）**。
 - **如果你不接受以上任何一条，请立即停止使用并删除本工具**：用包内 `安全安装.bat` 卸载
-  （选 `[Y]`；它会还原备份、移除插件本体，但保留 `plugin\` 里的姿态预设与配置），
+  （选 `2`；它会还原备份、移除插件本体，但保留 `plugin\` 里的姿态预设与配置），
   要彻底删除就连 `plugin\` 文件夹一起删掉。
 
 </details>
