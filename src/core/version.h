@@ -6,6 +6,6 @@
 // Plain include guards work for both C++ and RC.
 #ifndef POSER_VERSION_MAJOR
 #define POSER_VERSION_MAJOR 0
-#define POSER_VERSION_MINOR 3
-#define POSER_VERSION_PATCH 9
+#define POSER_VERSION_MINOR 4
+#define POSER_VERSION_PATCH 0
 #endif
