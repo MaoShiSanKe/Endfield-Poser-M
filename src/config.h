@@ -398,6 +398,7 @@ static bool LoadPoserConfig() {
     }
     else if (strcmp(key, "click_through") == 0)   g_clickThrough = (strtoul(val, nullptr, 0) != 0);
     else if (strcmp(key, "ik_enabled") == 0)      g_ikEnabled = (strtoul(val, nullptr, 0) != 0);
+    else if (strcmp(key, "debug_cloth") == 0)     g_debugCloth = (strtoul(val, nullptr, 0) != 0);
     else if (strcmp(key, "show_bone_params") == 0) g_showBoneParams = (strtoul(val, nullptr, 0) != 0);
     else if (strcmp(key, "show_library") == 0)     g_showLibrary = (strtoul(val, nullptr, 0) != 0);
     else if (strcmp(key, "show_morph") == 0)       g_showMorph = (strtoul(val, nullptr, 0) != 0);

@@ -27,8 +27,14 @@ static void OpenLog(const wchar_t *path) {
   }
 }
 
+// 布料子系统的诊断（[CLOTH-*]）默认静默：那是调试仪表，量极大——实测一次会话就能写几十 MB，
+// 既费磁盘也拖性能，还会把真正有用的行冲掉。需要时在 poser_config.txt 里写 debug_cloth=1。
+static bool g_debugCloth = false;
+
 void Log(const char *fmt, ...) {
   if (g_logHandle == INVALID_HANDLE_VALUE)
+    return;
+  if (!g_debugCloth && fmt && strncmp(fmt, "[CLOTH-", 7) == 0)
     return;
   EnterCriticalSection(&g_logLock);
   char buf[4096];

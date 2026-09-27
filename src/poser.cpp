@@ -392,10 +392,6 @@ static void DrawPoserGuiBody() {
     ImGui::Separator();
     ImGui::Checkbox(u8"\u663e\u793a\u9aa8\u9abc", &g_showBones);
     ImGui::SameLine();
-    ImGui::Checkbox(u8"\u9aa8\u9abc\u53c2\u6570", &g_showBoneParams);
-    if (ImGui::IsItemHovered())
-      ImGui::SetTooltip(u8"\u6253\u5f00\u9aa8\u9abc\u53c2\u6570\u7a97\u53e3\uff08\u65cb\u8f6c/\u4f4d\u7f6e\u6ed1\u6761\u3001\u6570\u503c\u8f93\u5165\u3001\u590d\u4f4d\u3001\u64a4\u9500\uff09");
-    ImGui::SameLine();
     ImGui::TextDisabled(
         g_selectedName[0] ? g_selectedName : u8"\u672a\u9009\u4e2d");
     ImGui::Text("Bones=%d  Overlay: %s", s_humanBoneCount, g_overlayStatus);

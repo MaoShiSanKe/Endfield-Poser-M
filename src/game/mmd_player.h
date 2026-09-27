@@ -549,7 +549,14 @@ static void MmdHideProps(bool force = false) {
             [&](const MmdSavedProp &p) { return p.object == object; });
         if (found == s.props.end()) {
           s.props.push_back({object, active});
-          Log("[MMD] prop hidden: %s (was active=%d)", name, int(active));
+          // 游戏会不断重建同名部件，逐个记会刷屏：同一个名字只记第一次
+          static std::vector<std::string> loggedNames;
+          std::string key(name);
+          if (std::find(loggedNames.begin(), loggedNames.end(), key) ==
+              loggedNames.end()) {
+            loggedNames.push_back(key);
+            Log("[MMD] prop hidden: %s (was active=%d)", name, int(active));
+          }
         }
         if (active)
           MmdSetActive(object, false);

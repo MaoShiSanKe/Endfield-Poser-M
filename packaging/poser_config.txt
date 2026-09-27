@@ -20,3 +20,7 @@ mmd_play_key=CTRL+F5
 mmd_pause_key=CTRL+F6
 mmd_stop_key=CTRL+F7
 mmd_reset_key=CTRL+F8
+
+# 布料子系统的诊断输出（[CLOTH-*] 那批）：默认 0 静默。
+# 它是调试仪表，量极大（一次会话能写几十 MB）——只有在排查衣物物理问题时才设成 1。
+debug_cloth=0
