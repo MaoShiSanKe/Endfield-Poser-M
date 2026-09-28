@@ -29,7 +29,7 @@
 > Vulkan 走 `vulkan-1.dll`，同时放着互不影响。
 
 1. 解压 → 双击包内 `安全安装.bat`（或按上面的表手动放置）；
-2. 用平时的启动方式（官方启动器或 EFMI / XXMI 等）进入游戏，游戏用「窗口化 / 无边框全屏」；
+2. 用官方启动器进入游戏（官方预编译包不含 EFMI / XXMI 兼容层），游戏用「窗口化 / 无边框全屏」；
 3. 第一次进游戏会弹【用户协议与免责声明】：读完 → 点「同意并继续」；
 4. 按 `L` 呼出面板，`P` 冻结 / 解冻；面板点不到就按住 `Alt` 呼出游戏光标再点。
 
@@ -65,13 +65,12 @@ mmd_pause_key=CTRL+F6
 mmd_stop_key=CTRL+F7
 mmd_reset_key=CTRL+F8
 click_through=1           # 1=覆盖层常驻并真穿透（推荐）；0=按住 Alt 才显示面板
-overlay_mode=0            # 0=自动（检测到 XXMI/3DMigoto 时改用分层窗口）；1=强制 DComp；2=强制分层窗口
-overlay_fps=60            # 分层窗口路径的呈现帧率上限（0=不限；mod 多/机器吃紧可降到 30）
 ik_enabled=0              # 实验性的 IK 控制器（0=关；面板里也可以勾）
 default_pose_dir=plugin\poses
 ```
 
 `default_pose_dir` 支持绝对路径，或相对游戏根目录的路径；面板底部会显示当前保存位置。
+默认构建仅使用 DComp。旧配置中的 `overlay_mode`、`overlay_fps` 会被忽略，修改配置不能启用 XXMI 兼容层。
 
 ## 构建
 
@@ -87,7 +86,7 @@ build.bat
 ```
 
 两种方式产物都落在 `plugin/`：`poser.dll`（插件）、`d3dcompiler_47.dll`、`vulkan-1.dll`（代理）。
-发布包用 `tools\package_release.ps1 -Version x.y.z` 组装（会顺带做署名自查）。
+发布包用 `tools\package_release.ps1 -Version x.y.z` 组装（会校验 DLL 是否编入layered-window overlay，并做署名检查）。
 
 ### Linux / 沙箱（数学层单测）
 
@@ -123,7 +122,7 @@ endfield-poser/
   从骨，换角色要重新调表情；强行套用别的角色面部骨会得到错位 / 夸张的脸（面板默认勾选
   「不保存 / 不套用表情」，旧文件里带这类数据时载入也会跳过）。
 - MMD 表情参考自[茶叶味香皂](https://space.bilibili.com/3546783156276148)的模型。材质、贴图等特殊效果不支持，替换模型可能无法使用原角色校准。
-- **装了较多第三方渲染 mod 的机器上面板会卡顿**：分层窗口路径每帧要做一次 GPU→CPU 回读；已做两项缓解
+- **自行编译并启用 XXMI 兼容层后，较多第三方渲染 mod 可能让面板卡顿**：分层窗口路径每帧要做一次 GPU→CPU 回读；已做两项缓解
   （面板内容没变时跳过整轮回读、`overlay_fps` 限帧），吃紧就把 `overlay_fps` 降到 30。
 - **冻结后骨架有轻微颤抖**（老机制遗留：逐帧钉姿势会和游戏侧仍在写的系统轻微打架）。不影响摆姿与保存。
 - **IK 控制器是实验性功能、默认关闭**：面板里勾 `IK 控制器（实验性）`（或 `ik_enabled=1`）才出现。

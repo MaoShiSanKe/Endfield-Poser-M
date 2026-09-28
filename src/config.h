@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include "core/plugin_paths.h"
+#include "core/build_features.h"
 
 void Log(const char *fmt, ...);
 
@@ -36,6 +37,8 @@ static bool g_showBoneParams = true;  // 核心编辑窗（选中骨参数 + IK 
 static bool g_showLibrary = false;    // 姿态库
 static bool g_showMorph = false;      // 形态键
 static bool g_showRoster = false;     // 角色列表
+#if POSER_ENABLE_LAYERED_OVERLAY
+// These settings exist only in source builds with the optional backend.
 // overlay_mode：0=auto（检测到 XXMI/3DMigoto 的 d3d11.dll 时用分层窗口，否则 DComp）
 //               1=强制 DComp   2=强制分层窗口（UpdateLayeredWindow，兼容性最好）
 static int g_overlayMode = 0;
@@ -43,6 +46,7 @@ static int g_overlayMode = 0;
 // GPU→CPU 回读，而 Map() 会等 GPU 队列跑完 —— mod 多的机器上等得久，会卡顿。
 // 60 = 默认（够用且流畅）；0 = 不限制；减小它可显著降低对游戏的干扰。
 static int g_overlayFps = 60;
+#endif
 // 用户是否已阅读并同意用户协议（见 editor/panel_agreement.h）：
 // 存的是「已同意的条款版本」，小于当前版本就要重新弹一次。
 static int g_termsAcceptedVersion = 0;
@@ -373,6 +377,9 @@ static bool LoadPoserConfig() {
   FILE *f = OpenPoserFile(L"poser_config.txt", L"r");
   if (!f) return false;
   char line[512];
+#if !POSER_ENABLE_LAYERED_OVERLAY
+  bool ignoredOverlayConfig = false;
+#endif
   while (fgets(line, sizeof(line), f)) {
     StripBom(line);
     char *e = line + strlen(line) - 1;
@@ -405,11 +412,16 @@ static bool LoadPoserConfig() {
     else if (strcmp(key, "show_roster") == 0)      g_showRoster = (strtoul(val, nullptr, 0) != 0);
     else if (strcmp(key, "terms_version") == 0)
       g_termsAcceptedVersion = (int)strtoul(val, nullptr, 0);
+#if POSER_ENABLE_LAYERED_OVERLAY
     else if (strcmp(key, "overlay_mode") == 0)    g_overlayMode = (int)strtoul(val, nullptr, 0);
     else if (strcmp(key, "overlay_fps") == 0) {
       int v = (int)strtoul(val, nullptr, 0);
       g_overlayFps = (v < 0) ? 0 : (v > 240 ? 240 : v);
     }
+#else
+    else if (strcmp(key, "overlay_mode") == 0 || strcmp(key, "overlay_fps") == 0)
+      ignoredOverlayConfig = true;
+#endif
     else if (strcmp(key, "default_pose_dir") == 0) {
       if (val[0] == '\0') {
         ResolveDefaultPoseDir();
@@ -437,11 +449,16 @@ static bool LoadPoserConfig() {
   }
   fclose(f);
   CheckHotkeyConflicts();
-  Log("[CFG] gui_toggle_key=%s%d (0x%X) freeze_key=%s%d (0x%X) "
-      "overlay_mode=%d overlay_fps=%d ik=%d",
+  Log("[CFG] gui_toggle_key=%s%d (0x%X) freeze_key=%s%d (0x%X) ik=%d",
       g_guiToggleCtrl ? "CTRL+" : "", g_guiToggleVK, g_guiToggleVK,
-      g_freezeCtrl ? "CTRL+" : "", g_freezeVK, g_freezeVK, g_overlayMode,
-      g_overlayFps, (int)g_ikEnabled);
+      g_freezeCtrl ? "CTRL+" : "", g_freezeVK, g_freezeVK, (int)g_ikEnabled);
+#if POSER_ENABLE_LAYERED_OVERLAY
+  Log("[CFG] overlay_mode=%d overlay_fps=%d", g_overlayMode, g_overlayFps);
+#else
+  if (ignoredOverlayConfig)
+    Log("[CFG] overlay_mode/overlay_fps ignored: this build contains DComp only; "
+        "XXMI compatibility requires rebuilding with POSER_ENABLE_LAYERED_OVERLAY=1");
+#endif
   // 配置是老版本留下的值时，用户容易以为"默认键没生效"（旧版默认的功能键），
   // 这里把"实际生效的键"连同提示一起打出来
   {
