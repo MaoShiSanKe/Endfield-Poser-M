@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 project(endfield_poser CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+option(POSER_ENABLE_LAYERED_OVERLAY "Compile the optional XXMI layered-window backend" OFF)
+message(STATUS "Layered overlay: ${POSER_ENABLE_LAYERED_OVERLAY}")
 
 # MSVC：源码含 UTF-8 中文注释/字符串，缺 /utf-8 时 GBK 误读会把
 # 行尾字节解析成反斜杠续行符，导致下一行被吞（C2046 等假错误）。
@@ -48,7 +50,7 @@ if(WIN32)
     src/math/mmd_motion.h src/math/mmd_rig.h src/math/mmd_retarget.h src/math/mmd_props.h src/math/mmd_adaptation.h src/math/mmd_amplitude.h
     src/game/mmd_player.h src/game/mmd_io.h src/game/frozen_grip.h src/editor/panel_mmd.h src/editor/panel_mmd_adaptation.h
     src/core/game_hooks.h
-    src/core/gui_overlay.h src/core/layered_readback.h src/core/overlay_device.h
+    src/core/gui_overlay.h src/core/build_features.h
     src/core/frame_driver.h src/math/frame_cadence.h
     src/core/runtime_bootstrap.h src/core/runtime_lifetime.h src/core/runtime_shutdown.h src/core/plugin_paths.h src/core/proxy_loader.h
     src/game/mmd_audio.h src/math/mmd_audio_sync.h
@@ -70,9 +72,14 @@ if(WIN32)
     deps/imgui/imgui_impl_win32.cpp
     deps/imguizmo/ImGuizmo.cpp
   )
+  if(POSER_ENABLE_LAYERED_OVERLAY)
+    target_sources(poser PRIVATE src/core/gui_overlay_layered.h
+      src/core/layered_readback.h src/core/overlay_device.h)
+  endif()
   target_include_directories(poser PRIVATE
     deps deps/imgui deps/imguizmo deps/minhook_lib/include deps/json src ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_definitions(poser PRIVATE
+    POSER_ENABLE_LAYERED_OVERLAY=$<BOOL:${POSER_ENABLE_LAYERED_OVERLAY}>
     APPLEPIE_PLUGIN_IMPL _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN
     IMGUI_DEFINE_MATH_OPERATORS _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
   # /EHa：让 __except 也能捕获 C++ 异常（IL2CPP 调用可能抛 0xe06d7363，

@@ -96,6 +96,8 @@ if ($notesHead -notmatch [regex]::Escape($Version)) {
 
 # --- DLL 新鲜度：源码比 poser.dll 新就提醒 ---
 $dll = Join-Path $root 'plugin\poser.dll'
+# Inspect the built DLL, not a cache or sidecar that may describe an older build.
+& (Join-Path $PSScriptRoot 'assert_release_overlay.ps1') -Dll $dll
 $dllTime = (Get-Item -LiteralPath $dll).LastWriteTime
 $newer = Get-ChildItem -Recurse -File -LiteralPath (Join-Path $root 'src') |
   Where-Object { $_.LastWriteTime -gt $dllTime }
@@ -191,7 +193,7 @@ if ($riskyHits) {
   $riskyHits | Select-Object -Unique | ForEach-Object { Write-Host "  $_" }
 }
 
-# 文案漂移检查：默认热键早已从 F11/F12 改成 L/P，启动方式也改成"官方启动器或 XXMI"。
+# 文案漂移检查：默认热键早已从 F11/F12 改成 L/P，默认发行版使用官方启动器且不含 XXMI 兼容层。
 # 包内文档若还留着单独出现的 F11/F12（例如老版安装向导里的"F12：呼出面板"），
 # 说明有文档没跟着更新 —— 实测踩过（安全安装.bat 停留在 v0.3.0 的说法）。
 # 用 Latin-1 读文件：无论内容是 UTF-8 还是 GBK，ASCII 片段都能原样匹配；F12/F11 这种
