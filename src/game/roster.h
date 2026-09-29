@@ -381,6 +381,8 @@ static void ScanSceneForCharactersNow() {
 // 恢复该角色自己的冻结状态（没冻过就保持游戏默认）。
 // 注意：只换"我们在编辑谁"，**不改变游戏自己操控的角色**（那个还是游戏说了算）。
 static void RosterSwitchEditTarget(int idx) { g_rosterSelectPending = idx; }
+// 定义在 poser.cpp（要用小队接口）：按 animator 反查该角色真正的 Entity。
+static void *RosterFindEntityForAnimator(void *animator);
 static void RosterSwitchEditTargetNow(int idx) {
   if (idx < 0 || idx >= g_rosterCharCount) return;
   const RosterChar &e = g_rosterChars[idx];
@@ -393,7 +395,9 @@ static void RosterSwitchEditTargetNow(int idx) {
   g_selectedRosterReferences = g_rosterReferences;
   g_charAnimator = e.animator;
   g_charAnimComp = UnityObjAlive(e.animComp) ? e.animComp : nullptr;
-  g_mainCharEntity = g_captureEntity = nullptr;
+  // 必须把真正的 Entity 找回来。布料增强要求 host 是 Beyond.Gameplay.Core.Entity；
+  // 这里若退回 Animator，衣物准备会直接失败，而失败会把 MMD 播放时钟永久按住。
+  g_mainCharEntity = g_captureEntity = RosterFindEntityForAnimator(e.animator);
   g_editSelection.selectManual();
   g_charChanged = true;
   RebuildCapturedCharacter();

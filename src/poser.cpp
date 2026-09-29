@@ -34,6 +34,22 @@ static void RebuildCapturedCharacter();
 #include "game/cloth_init.h"
 #include "config.h"
 
+// 角色列表换编辑目标时，把该角色真正的 Entity 找回来（按 animator 反查当前小队）。
+// 布料增强要求 host 是 Beyond.Gameplay.Core.Entity；只有 Animator 时衣物准备会直接
+// 失败，而失败会把 MMD 播放时钟永久按住（表现就是"动作卡在第一帧"）。
+static void *RosterFindEntityForAnimator(void *animator) {
+  if (!animator)
+    return nullptr;
+  const auto roster = poser_squad::Read();
+  for (int n = 0; n < roster.count; ++n)
+    if (roster.members[n].animator == animator && roster.members[n].entity) {
+      Log("[ROSTER] edit target entity resolved from squad slot %d", n + 1);
+      return roster.members[n].entity;
+    }
+  Log("[ROSTER] edit target is not in the current squad; cloth enhancement unavailable");
+  return nullptr;
+}
+
 // 手动刷新骨骼（面板按钮 / WebUI /api/refresh 共用）
 // 面板里的「打开日志」：弹资源管理器并选中 poser_log.txt —— 让非技术用户
 // 一步就能把日志拖给作者（路径：<游戏目录>\plugin\poser_log.txt）

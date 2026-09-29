@@ -1218,6 +1218,40 @@ static bool MmdClothMayAdjustAnchor(void *transform) {
     if (s_allBones[i].transform==transform && g_mmd.mapper.output.write[i]) return false;
   return true;
 }
+// 衣物增强的准备阶段会按住播放时钟（timeline.holdClock）。准备能不能推进，取决于
+// gate 里存的 owner 是否还等于当前的 ClothHostEntity()——从角色列表换编辑目标之后
+// 这个值就变了（g_mainCharEntity 被清空、只换 g_charAnimator），准备永远推进不了；
+// 而 Waiting 一直算"按住"，播放就永远停在第 0 帧。
+// 这里放行两道：owner 不匹配立刻放弃；准备太久也放弃——先让动作能播。
+// 准备最多等这么久；到点还没好才放弃（放弃=这次不带增强，动作照播）。
+constexpr uint64_t kMmdClothGateTimeoutMs = 8000;
+static void MmdExpireClothPlaybackGate() {
+  auto &gate=g_clothPlaybackGate;
+  const auto state=gate.State();
+  // 只记状态跳变，量很小；正常情况下这些行是排查这类问题唯一的线索。
+  static int lastState=-1;
+  if(int(state)!=lastState) {
+    lastState=int(state);
+    Log("[MMD] cloth gate state=%d held=%d reason=%s",int(state),
+        int(gate.Holding(1u,s_clothRequestGeneration)),
+        s_ClothActorRequest.Get().preparationReason);
+  }
+  if(state==eiem_playback::Preparation::Idle||state==eiem_playback::Preparation::Ready)
+    return;
+  if(!gate.Matches(1u,s_clothRequestGeneration,uintptr_t(ClothHostEntity()))) {
+    // host 变了（例如从角色列表换了编辑目标）：不是放弃衣物，而是丢掉旧 host 的
+    // 会话、为新的 host 重新申请一次准备，这样衣物增强照样能生效。
+    Log("[MMD] cloth host changed while preparing -> re-requesting cloth for the new character");
+    ClothRequestPlayback(false);
+    ClothRequestPlayback(true);
+    return;
+  }
+  const uint64_t elapsed=gate.Elapsed(GetTickCount64());
+  if(elapsed<kMmdClothGateTimeoutMs)return;
+  Log("[MMD] cloth preparation gave up after %llu ms (state=%d) -> playing without enhancement",
+      (unsigned long long)elapsed,int(state));
+  gate.Cancel();
+}
 static bool MmdStart() {
   auto &m = g_mmd;
   if(MmdSquadBusy()) {m.status=u8"请先完成多人导入或停止多人播放";return false;}
@@ -1257,6 +1291,7 @@ static bool MmdStart() {
   if (!m.clip.bones.empty() && m.autoScale)
     m.scale = m.mapper.suggestedScale;
   MmdCaptureSession();
+  MmdExpireClothPlaybackGate();
   m.timeline.holdClock(g_clothPlaybackGate.Holding(1u,s_clothRequestGeneration),MmdNow());
   InterlockedExchange(&g_mmdOwnsPose, 1);
   MmdUpdateDuration();
@@ -1306,6 +1341,7 @@ static void MmdTick() {
       MmdStop();
       return;
     }
+    MmdExpireClothPlaybackGate();
     m.timeline.holdClock(g_clothPlaybackGate.Holding(1u,s_clothRequestGeneration),MmdNow());
     if (MmdOwnsPose()) {
       m.timeline.tick(MmdNow());
