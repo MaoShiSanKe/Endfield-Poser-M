@@ -25,6 +25,9 @@
 #include "build_features.h"
 #include "config.h"   // g_guiToggleVK / g_screenshotVK / 相机速度
 #include "user_agreement.h"
+#include "math/hotkey_state.h"
+#include "mmd_countdown_hud.h"
+static bool g_overlayPanelsDraw=true;
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -68,7 +71,7 @@ static bool g_inputDragging = false;   // gizmo 拖拽中：必须持续吃，�
 // 也包括游戏自己放开的情况（摄影模式、菜单等）。判定规则：光标出来了就该能点
 // 面板，不必再额外按 Alt。
 static bool g_cursorFreeNow = false;
-static bool g_inputWantsText = false;  // 输入框聚焦中（键盘临时归覆盖层）
+static std::atomic<bool> g_inputWantsText{false};
 // 左键在我们窗口按下且尚未松开：拖拽/点选期间必须一直吃鼠标，否则松开消息会丢给
 // 游戏或落进黑洞，ImGui 的 MouseDown 永远卡在按下 → 之后点哪都没反应。
 static bool g_inputMouseHeld = false;
@@ -120,8 +123,7 @@ static volatile LONG g_hotkeyCaptureVK = 0;
 static volatile LONG g_hotkeyCaptureCtrl = 0;
 
 static DWORD WINAPI HotkeyPollThread(LPVOID) {
-  bool prevToggle = false, prevFreeze = false;
-  bool prevMmd[4] = {};
+  poser::HotkeyEdge toggleEdge,freezeEdge,mmdEdges[4];
   bool prevLBtn = false;
   static bool prevAll[256] = {};
   int lastCapture = 0;
@@ -174,49 +176,45 @@ static DWORD WINAPI HotkeyPollThread(LPVOID) {
             InterlockedExchange(&g_hotkeyCaptureVK, -1);
             break;
           }
+          // The config format supports Ctrl, not Shift/Alt. Do not silently
+          // save Shift+key as Ctrl+key: that makes the captured shortcut fail.
+          if(shift || (GetAsyncKeyState(VK_MENU)&0x8000))continue;
           InterlockedExchange(&g_hotkeyCaptureVK, vk);
-          InterlockedExchange(&g_hotkeyCaptureCtrl, (ctrl || shift) ? 1 : 0);
+          InterlockedExchange(&g_hotkeyCaptureCtrl, ctrl ? 1 : 0);
           Log("[CFG] captured vk=0x%X (%s%s)", vk, ctrl ? "CTRL+" : "",
               shift ? "SHIFT+" : "");
           break;
         }
       }
       // 捕获期间不触发正常热键
-      prevToggle = (GetAsyncKeyState(g_guiToggleVK) & 0x8000) != 0;
-      prevFreeze = (GetAsyncKeyState(g_freezeVK) & 0x8000) != 0;
-      for(int i=0;i<4;++i) prevMmd[i]=(GetAsyncKeyState(g_mmdHotkeyVK[i])&0x8000)!=0;
+      toggleEdge.down = (GetAsyncKeyState(g_guiToggleVK) & 0x8000) != 0;
+      freezeEdge.down = (GetAsyncKeyState(g_freezeVK) & 0x8000) != 0;
+      for(int i=0;i<4;++i) mmdEdges[i].down=(GetAsyncKeyState(g_mmdHotkeyVK[i])&0x8000)!=0;
       Sleep(5);
       continue;
     }
     lastCapture = 0;
-    // 在插件自己的输入框里打字时不响应热键（否则单键绑成字母就会边打字边触发）
-    if (g_inputWantsText) {
-      prevToggle = (GetAsyncKeyState(g_guiToggleVK) & 0x8000) != 0;
-      prevFreeze = (GetAsyncKeyState(g_freezeVK) & 0x8000) != 0;
-      for(int i=0;i<4;++i) prevMmd[i]=(GetAsyncKeyState(g_mmdHotkeyVK[i])&0x8000)!=0;
-      Sleep(5);
-      continue;
-    }
     // 只有游戏窗口（或我们自己的覆盖窗）在前台时才响应热键：
     // 否则在浏览器/聊天里打字也会触发（尤其是被绑成字母的情况）
     HWND fg = GetForegroundWindow();
     bool ourFocus = (fg != nullptr) && (fg == g_gameHwnd || fg == g_guiHwnd);
     bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    auto allowed=[&](int key,bool combo) {
+      return poser::HotkeyAllowed(ourFocus,fg==g_guiHwnd,g_guiVisible,g_inputWantsText.load(),key,combo);
+    };
     for(int i=0;i<4;++i) {
       bool pressed=(GetAsyncKeyState(g_mmdHotkeyVK[i])&0x8000)!=0 && (!g_mmdHotkeyCtrl[i] || ctrl);
-      if(poser_agreement::Allowed() && ourFocus && pressed && !prevMmd[i]) InterlockedOr(&g_mmdHotkeyRequests,1<<i);
-      prevMmd[i]=pressed;
+      if(mmdEdges[i].sample(pressed,poser_agreement::Allowed() && allowed(g_mmdHotkeyVK[i],g_mmdHotkeyCtrl[i])))
+        InterlockedOr(&g_mmdHotkeyRequests,1<<i);
     }
-    bool t = ourFocus && (GetAsyncKeyState(g_guiToggleVK) & 0x8000) != 0 &&
+    bool t = (GetAsyncKeyState(g_guiToggleVK) & 0x8000) != 0 &&
              (!g_guiToggleCtrl || ctrl);
-    bool f = ourFocus && (GetAsyncKeyState(g_freezeVK) & 0x8000) != 0 &&
+    bool f = (GetAsyncKeyState(g_freezeVK) & 0x8000) != 0 &&
              (!g_freezeCtrl || ctrl);
-    if (t && !prevToggle)
+    if (toggleEdge.sample(t,allowed(g_guiToggleVK,g_guiToggleCtrl)))
       InterlockedIncrement(&g_hotkeyToggleReq);
-    if (poser_agreement::Allowed() && f && !prevFreeze)
+    if (freezeEdge.sample(f,poser_agreement::Allowed() && allowed(g_freezeVK,g_freezeCtrl)))
       InterlockedIncrement(&g_hotkeyFreezeReq);
-    prevToggle = t;
-    prevFreeze = f;
     Sleep(5);
   }
   return 0;
@@ -255,6 +253,7 @@ static void DrawHotkeySetting(const char *label, const char *cfgKey, int *vkp,
   } else {
     int got = (int)g_hotkeyCaptureVK;
     if (got == 0) {
+      ImGui::TextDisabled(u8"支持单键或 Ctrl＋键；请松开 Shift / Alt 后录入。");
       ImGui::TextDisabled(
           u8"\u6309\u4e0b\u65b0\u952e\u2026\uff08\u5355\u952e\u4e5f\u884c\uff0c"
           u8"\u4f46\u5355\u5b57\u6bcd\u4f1a\u548c\u6253\u5b57\u51b2\u7a81\uff1b"
@@ -729,8 +728,17 @@ static DWORD GuiThreadBody(LPVOID) {
     bool altHeld = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
     // click_through 模式：面板打开就常驻显示，靠分层穿透把鼠标让给游戏；
     // 默认模式：只有按住 Alt（或拖拽中）才显示覆盖层，其余时间整窗隐藏。
-    bool shouldShow = g_guiVisible && !IsIconic(g_gameHwnd) &&
-                      (g_clickThrough || altHeld || g_inputDragging || !poser_agreement::Allowed());
+    g_overlayPanelsDraw=g_guiVisible &&
+      (g_clickThrough || altHeld || g_inputDragging || !poser_agreement::Allowed());
+    const int countdown=g_mmdCountdownDisplay.load(std::memory_order_acquire);
+    static int lastCountdown=0;
+    if(lastCountdown!=countdown) {
+      lastCountdown=countdown;nextDrawTick=0;
+#if POSER_ENABLE_LAYERED_OVERLAY
+      g_layerForcePresent=true;
+#endif
+    }
+    bool shouldShow = !IsIconic(g_gameHwnd) && (g_overlayPanelsDraw || countdown>0);
     static int s_showLogged = -1;
     if ((int)shouldShow != s_showLogged) {
       s_showLogged = (int)shouldShow;
@@ -825,11 +833,12 @@ static DWORD GuiThreadBody(LPVOID) {
       // 面板/关节/旋转环上（或正在拖拽）时才关掉穿透，把这次交互留给覆盖层。
       // 放在这里（DrawPoserGui 之后）是关键：用的是**本帧**的 hover 状态，
       // 快一帧都不行 —— 否则快速移到旋转环上立刻点击，那一下会被判成点游戏。
-      if (g_clickThrough) {
+      if(!g_overlayPanelsDraw)SetOverlayClickThrough(true);
+      else if (g_clickThrough) {
         bool overInteractive = g_inputTakeMouse || g_inputHoverGizmo ||
                                g_inputDragging || g_inputMouseHeld;
         SetOverlayClickThrough(!(g_cursorFreeNow && overInteractive));
-      }
+      } else SetOverlayClickThrough(false);
       bool wantText = io.WantTextInput;
       if (wantText != g_inputWantsText) {
         g_inputWantsText = wantText;

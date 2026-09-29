@@ -86,7 +86,7 @@ static bool CharacterSwitchInProgress() {
 // Shared ownership flag: web edits must not race the MMD playback writer.
 static volatile LONG g_mmdOwnsPose = 0;
 static bool MmdOwnsPose() { return InterlockedCompareExchange(&g_mmdOwnsPose, 0, 0) != 0; }
-static void (*g_beforeCharacterChange)() = nullptr;
+static void (*g_beforeCharacterChange)(void *nextEntity) = nullptr;
 static SRWLOCK g_pendingCharacterLock = SRWLOCK_INIT;
 static void *g_pendingController = nullptr;
 static void *g_pendingEntity = nullptr;
@@ -329,8 +329,8 @@ static void ResolveEntityOffsets(void *entity) {
   }
 }
 
-// 设置当前角色 Entity → 提取 Animator 存入 g_charAnimator
-static bool SetCharacterEntity(void *entity) {
+// Read an Entity without changing the editor selection (also used by squad playback).
+static bool ReadCharacterRig(void *entity, void **outAnimator, void **outComponent) {
   if (CharacterSwitchInProgress() || !entity)
     return false;
   ResolveEntityOffsets(entity);
@@ -368,9 +368,17 @@ static bool SetCharacterEntity(void *entity) {
         il2cpp_object_get_class(animator) != g_animatorClass ||
         !UnityObjAlive(SafeGetComponentTransform(animator)))
       return false;
+    *outAnimator=animator; *outComponent=cac; return true;
+  } __except(1) {return false;}
+}
+
+static bool SetCharacterEntity(void *entity) {
+  void *animator=nullptr,*cac=nullptr;
+  if(!ReadCharacterRig(entity,&animator,&cac))return false;
+  __try {
     if (animator != g_charAnimator || entity != g_mainCharEntity) {
       if (g_beforeCharacterChange)
-        g_beforeCharacterChange(); // Restore using OLD actor handles first.
+        g_beforeCharacterChange(entity); // Restore using OLD actor handles first.
       g_mainCharEntity = entity;
       g_charAnimator = animator;
       g_charChanged = true;
@@ -462,7 +470,7 @@ static void *FindPlayerControllerInstance() {
 static void SelectCaptureEntity(void *entity) {
   if (entity != g_captureEntity) {
     if (g_beforeCharacterChange)
-      g_beforeCharacterChange(); // Stop even if the new Animator is not ready.
+      g_beforeCharacterChange(entity); // Stop even if the new Animator is not ready.
     g_captureEntity = entity;
     Log("[POSER] character selection: entity=%p controller=%p", entity,
         g_playerController);

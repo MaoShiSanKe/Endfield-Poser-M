@@ -5,6 +5,7 @@
 
 #include <cstdint>
 
+#include "core/build_features.h"
 #include "core/base.h"
 #include "core/il2cpp_api.h"
 #include "core/runtime_bootstrap.h"
@@ -22,12 +23,13 @@
 #include "editor/rig_gizmo.h"
 #include "editor/panel_bones.h"
 #include "editor/ik_control.h"
-static void PrepareCharacterHandoff();
+static void PrepareCharacterHandoff(void *nextEntity=nullptr);
 static void RebuildCapturedCharacter();
 #include "game/roster.h"
 #include "editor/panel_library.h"
 #include "editor/panel_morph.h"
 #include "editor/panel_mmd.h"
+#include "editor/panel_mmd_squad.h"
 #include "editor/panel_agreement.h"
 #include "game/cloth_init.h"
 #include "config.h"
@@ -147,12 +149,12 @@ static bool CursorVisible() {
 }
 
 // ---- 每帧更新（阶段 2+：冻结维持、骨骼列表维护、IK 写回、相机）----
-static void PrepareCharacterHandoff() {
+static void PrepareCharacterHandoff(void *nextEntity) {
   // Called before replacing any current actor handle, including delayed
   // captures. Save cached values; never query the outgoing skeleton for them.
   void *oldAnimator = g_charAnimator;
   bool oldAlive = CharAnimatorAlive();
-  MmdCharacterChanging();
+  MmdCharacterChanging(nextEntity);
   SaveCharStateOnSwitch();
   if (g_preserveGripOnHandoff && g_frozen) {
     // The old actor remains posed through its retained writer grip. Physics and
@@ -285,7 +287,7 @@ static void GameFrameTickBody() {
     // 游戏/XXMI 的同键轮询抢掉锁存位（"有时有用有时没用"的根因）。
     if (TakeHotkeyFreeze()) {
       Log("[CTRL] freeze hotkey -> toggle freeze");
-      if (g_mmd.session.active) { MmdStop(); UnfreezeCharacter(); RestoreBlendShapes(); return; }
+      if (MmdOwnsPose() || g_mmd.session.active || g_mmd.preview) { MmdStop(); UnfreezeCharacter(); RestoreBlendShapes(); return; }
       if (g_frozen) {
         UnfreezeCharacter();
         RestoreBlendShapes();
@@ -296,6 +298,8 @@ static void GameFrameTickBody() {
     // 冻结态维持：每帧强制关闭 Animator/动画组件/IK 组件（游戏会重新启用）
     MaintainFreeze();
     LONG mmdKeys = InterlockedExchange(&g_mmdHotkeyRequests, 0);
+    if(mmdKeys)Log("[INPUT] MMD hotkey mask=%ld target=%s preview=%d",mmdKeys,
+      g_mmdSquadBridge.hotkeyTarget&&g_mmdSquadBridge.hotkeyTarget()?"squad":"single",g_mmd.preview);
     if (mmdKeys & (1 << 2)) MmdPlaybackCommand(2);
     else if (mmdKeys & (1 << 3)) MmdPlaybackCommand(3);
     else if (mmdKeys & (1 << 1)) MmdPlaybackCommand(1);
@@ -363,7 +367,7 @@ static void DrawPoserGuiBody() {
     // 只在真的装了 XXMI/3DMigoto 时才提示撞键，避免没装的用户被无谓打扰
     if (g_hotkeyConflict && g_xxmiDetected)
       ImGui::TextDisabled("\u26a0 %s", g_hotkeyConflictMsg);
-    if (ImGui::CollapsingHeader(u8"\u5feb\u6377\u952e\uff08\u53ef\u6539\uff09")) {
+    if (ImGui::CollapsingHeader(u8"快捷键设置")) {
       DrawHotkeySetting(u8"\u547c\u51fa / \u9690\u85cf\u9762\u677f",
                         "gui_toggle_key", &g_guiToggleVK, &g_guiToggleCtrl, 1);
       DrawHotkeySetting(u8"\u51bb\u7ed3 / \u89e3\u51bb", "freeze_key",
@@ -377,7 +381,6 @@ static void DrawPoserGuiBody() {
                           u8"\u4f60\u60f3\u7528\u7684\u7ec4\u5408\uff08\u81ea\u52a8"
                           u8"\u5199\u56de poser_config.txt\uff09");
     }
-    ImGui::SameLine();
     ImGui::Checkbox(u8"锁定窗口", &g_pinPanels);
     if (ImGui::IsItemHovered())
       ImGui::SetTooltip(u8"\u9501\u5b9a\u9762\u677f\u4f4d\u7f6e\uff1a\u62d6\u706b\u67f4\u4eba\u65f6\u7a97\u53e3\u4e0d\u8ddf\u7740\u52a8\uff1b\u53d6\u6d88\u540e\u53ef\u62d6\u6807\u9898\u79fb\u52a8");
@@ -386,15 +389,13 @@ static void DrawPoserGuiBody() {
       g_pinPanels = false;
       g_resetPanelLayoutFrames = 2;
     }
-    ImGui::TextDisabled(u8"拖动标题栏移动窗口；布局会自动保存");
+    ImGui::TextDisabled(u8"按住 Alt 操作面板；拖动标题栏调整布局");
     ImGui::Separator();
-    ImGui::Text("Animator=%p  Bones=%d", g_charAnimator, s_humanBoneCount);
-    ImGui::Separator();
+    ImGui::TextDisabled(g_charAnimator?u8"当前角色已就绪":u8"等待进入角色场景");
     ImGui::Checkbox(u8"\u663e\u793a\u9aa8\u9abc", &g_showBones);
     ImGui::SameLine();
-    ImGui::TextDisabled(
+    ImGui::TextDisabled("%s",
         g_selectedName[0] ? g_selectedName : u8"\u672a\u9009\u4e2d");
-    ImGui::Text("Bones=%d  Overlay: %s", s_humanBoneCount, g_overlayStatus);
     ImGui::Checkbox(u8"\u5168\u91cf\u9aa8\u9abc(\u5fae\u8c03)", &g_fullBones);
     if (ImGui::IsItemHovered())
       ImGui::SetTooltip(u8"\u9ed8\u8ba4\u53ea\u663e\u793a\u4e3b\u8981\u9aa8\u9abc\uff1b\u52fe\u9009\u540e\u53e0\u52a0\u5c42\u5c55\u793a/\u53ef\u62fe\u53d6\u6240\u6709\u9aa8\u9abc\uff08\u542b\u624b\u6307\u7b49\uff09\uff0c\u7528\u4e8e\u7cbe\u7ec6\u5fae\u8c03\u3002");
@@ -436,8 +437,9 @@ static void DrawPoserGuiBody() {
       SelectTransform(nullptr, nullptr);
     ImGui::Separator();
     ImGui::Checkbox(u8"MMD 播放器", &g_mmd.show);
-    if (ImGui::Button(g_frozen ? u8"解除冻结" : u8"冻结角色")) {
-      bool wasPlaying = g_mmd.session.active;
+    ImGui::Checkbox(u8"MMD 多人播放器", &g_squad.show);
+    if (ImGui::Button(g_frozen ? u8"解冻角色" : u8"冻结角色")) {
+      bool wasPlaying = MmdOwnsPose();
       if (wasPlaying) MmdStop();
       Log("[GUI] Freeze button clicked (frozen=%d animator=%p bones=%d)",
           (int)g_frozen, g_charAnimator, s_humanBoneCount);
@@ -506,6 +508,10 @@ static void DrawPoserGuiBody() {
         SaveConfigValue("show_roster", g_showRoster ? "1" : "0");
       }
     }
+    if(ImGui::CollapsingHeader(u8"诊断信息")) {
+      ImGui::Text("Animator=%p  Bones=%d",g_charAnimator,s_humanBoneCount);
+      ImGui::TextWrapped("Overlay: %s",g_overlayStatus);
+    }
   }
   ImGui::End();
 
@@ -570,6 +576,7 @@ static void DrawPoserGuiBody() {
   ImGui::EndDisabled();
   DrawMmdPanel();
   DrawRosterPanel();
+  DrawMmdSquadPanel();
   if (g_resetPanelLayoutFrames > 0) --g_resetPanelLayoutFrames;
 }
 
@@ -590,7 +597,19 @@ void DrawPoserGui() {
     ImGui::End();
     return;
   }
-  DrawPoserGuiBody();
+  if(g_overlayPanelsDraw)DrawPoserGuiBody();
+  else {g_inputHoverGizmo=false;g_inputDragging=false;TakeLeftClick();}
+  const int countdown=g_mmdCountdownDisplay.load(std::memory_order_acquire);
+  if(countdown>0) {
+    char label[16]{};snprintf(label,sizeof(label),"%d",countdown);
+    auto font=ImGui::GetFont();const float size=ImGui::GetFontSize()*4;
+    auto extent=font->CalcTextSizeA(size,FLT_MAX,0,label);
+    auto screen=ImGui::GetIO().DisplaySize;
+    ImVec2 at((screen.x-extent.x)*.5f,screen.y*.25f);
+    auto draw=ImGui::GetForegroundDrawList();
+    draw->AddText(font,size,ImVec2(at.x+3,at.y+3),IM_COL32(0,0,0,220),label);
+    draw->AddText(font,size,at,IM_COL32(255,255,255,255),label);
+  }
 }
 
 // 外部控制（PostMessage WM_APP+90 触发，绕过反作弊输入拦截）：
@@ -600,7 +619,7 @@ static void ExtControl(int code) {
   RuntimeThreadScope runtime;
   if (!runtime.ready) return;
   if (!poser_agreement::Allowed()) return;
-  if(g_mmd.session.active) { if(code==1){MmdStop();UnfreezeCharacter();} return; }
+  if(MmdOwnsPose() || g_mmd.session.active || g_mmd.preview) { if(code==1){MmdStop();UnfreezeCharacter();} return; }
   switch (code) {
   case 1:
     if (g_frozen) {
@@ -633,6 +652,7 @@ static void OnGuiShutdownRestore() {
   s_mmdClosing.store(true);
   if(HWND dialog=s_mmdDialog.load()) PostMessageW(dialog,WM_CLOSE,0,0);
   if(g_mmd.loading) { g_mmd.loader.wait(); g_mmd.loading=false; }
+  if(g_squad.loading) {g_squad.loader.wait();g_squad.loading=false;}
   if(g_mmd.faceLibraryLoading) { g_mmd.faceLoader.wait(); g_mmd.faceLibraryLoading=false; }
   if (g_frozen) {
     Log("[POSER] shutdown: unfreeze + restore (frozen=%d)", (int)g_frozen);
@@ -647,7 +667,7 @@ static void OnGuiShutdownRestore() {
   const ULONGLONG deadline=GetTickCount64()+1000;
   while (GetTickCount64()<deadline) {
     { std::lock_guard<std::recursive_mutex> lock(g_poseMutex);
-      if (!s_cloth.active && !s_cloth.releasing) return; }
+      if (!s_cloth.active && !s_cloth.releasing && !ClothSquadRestoring()) return; }
     Sleep(10);
   }
   Log("[CLOTH-RESTORE-PENDING] game callback has not completed shutdown restoration");
@@ -706,7 +726,24 @@ static void ProcessControlFileBody() {
       Log("[CTRL] command ignored: user agreement required");
       continue;
     }
-    if (strncmp(line, "mmd_load ", 9) == 0) {
+    if (strncmp(line, "squad_load ", 11) == 0) {
+      char *path=nullptr;int slot=int(strtol(line+11,&path,10));
+      if(path&&*path==' '&&slot>=1&&slot<=4)MmdSquadLoad(slot-1,false,std::filesystem::u8path(path+1));
+    } else if (strncmp(line,"squad_copy ",11)==0) {
+      MmdSquadCopyToAll(atoi(line+11)-1);
+    } else if (strncmp(line,"squad_seek ",11)==0) {
+      MmdSquadSeek(atof(line+11)/30.);
+    } else if (strcmp(line,"squad_play")==0) {
+      g_squad.hotkeys=true;MmdSquadCommand(0);
+    } else if (strcmp(line,"squad_pause")==0) {
+      MmdSquadCommand(1);
+    } else if (strcmp(line,"squad_stop")==0) {
+      g_squad.hotkeys=true;MmdSquadCommand(2);
+    } else if (strcmp(line,"squad_refresh")==0) {
+      g_squad.refresh=true;g_squad.show=true;
+    } else if (strcmp(line,"squad_line")==0) {
+      for(int i=0;i<4;++i)g_squad.slots[i].offset={float(i)-1.5f,0,0};
+    } else if (strncmp(line, "mmd_load ", 9) == 0) {
       MmdBeginLoad(0, std::filesystem::u8path(line + 9));
     } else if (strncmp(line, "mmd_append ", 11) == 0) {
       MmdBeginLoad(1, std::filesystem::u8path(line + 11));
@@ -731,18 +768,19 @@ static void ProcessControlFileBody() {
     } else if (strcmp(line, "mmd_calibrate_confirm") == 0) {
       MmdConfirmCalibration();
     } else if (strcmp(line, "mmd_calibrate_auto") == 0) {
-      if (!g_mmd.session.active && !g_mmd.loading) {
+      if (!g_mmd.session.active && !g_mmd.loading && !MmdSquadBusy()) {
         g_mmd.profileRevision = -1;
         MmdPrepareProfile();
       }
     } else if (strncmp(line, "mmd_seek ", 9) == 0) {
+      if(MmdSquadBusy()) {MmdSquadSeek(atof(line+9)/30.);continue;}
       if(!g_mmd.session.active) MmdStart();
       if(MmdOwnsPose()) {MmdSeek(atof(line+9)/30.);MmdApplyFrame();}
     } else if (strcmp(line, "toggle") == 0) {
       g_guiVisible = !g_guiVisible;
       Log("[CTRL] file toggle -> %d", (int)g_guiVisible);
     } else if (strcmp(line, "freeze") == 0) {
-      if(g_mmd.session.active) {MmdStop();UnfreezeCharacter();RestoreBlendShapes();continue;}
+      if(MmdOwnsPose() || g_mmd.session.active || g_mmd.preview) {MmdStop();UnfreezeCharacter();RestoreBlendShapes();continue;}
       if (g_frozen) {
         UnfreezeCharacter();
         RestoreBlendShapes();
@@ -797,11 +835,14 @@ static DWORD WINAPI InitThread(LPVOID) {
   OpenLog(PoserFilePath(L"poser_log.txt").c_str());
   Log("[POSER] === Endfield Poser v%s attached (build %s %s) ===",
       POSER_VERSION, __DATE__, __TIME__);
+  Log("[BUILD] %s", POSER_BUILD_DESCRIPTION);
   LoadPoserConfig();
   g_ikFeatureEnabled = g_ikEnabled;
   poser_agreement::accepted.store(TermsAccepted());
+  poser_gaze::LoadProfiles();
   Log("[AGREEMENT] revision %d: %s", poser_agreement::kRevision,
       poser_agreement::Allowed() ? "already accepted" : "confirmation required");
+  MmdSquadInstall();
   g_beforeCharacterChange = PrepareCharacterHandoff;
   g_onFreezeReleased=SMCReleaseFreeze;
   // 注册外部控制回调：PostMessage 通道（绕过反作弊对合成输入的拦截）
@@ -854,14 +895,16 @@ static DWORD WINAPI InitThread(LPVOID) {
   InitGameHooks(); // Task 2.1：SetMainCharacter hook → 捕获 Animator/Entity
   g_characterFramePulse=[](){SampleGameRenderFrame(3);};
   mmd_camera::framePulse=[](){SampleGameRenderFrame(4);};
-  mmd_camera::needsCamera=[](){return poser_gaze::settings.mode==eye_gaze::Mode::Camera;};
-  mmd_camera::afterCamera=[](void *camera){poser_gaze::SetCamera(camera);SMCGazeTick();};
+  mmd_camera::needsCamera=[](){return poser_gaze::motionLock||poser_gaze::settings.mode==eye_gaze::Mode::Camera;};
+  mmd_camera::afterCamera=SMCGazeCameraTick;
   InstallSMCFaceHooks(); // Task 4.2：SkeletalMorph 表情 hook（参照 EIEM smc_face.h）
   s_clothThreadId = []() -> DWORD {
     DWORD observed=g_frameGameThreadId.load();
     return observed?observed:(g_gameHwnd?GetWindowThreadProcessId(g_gameHwnd,nullptr):0);
   };
-  g_gameMaintenance = []() { ClothService(); };
+  s_clothHostEnabled=[](){return g_pluginEnabled;};
+  s_clothHostIdle=[](){return !MmdOwnsPose()&&!MmdSquadBusy()&&!g_mmd.preview;};
+  g_gameMaintenance = []() { ClothServiceActors(); };
   InstallFrameHook();
   mmd_camera::Initialize();
   StartWebServer(); // 独立 UI：localhost HTTP 服务器（浏览器打开控制窗口）
