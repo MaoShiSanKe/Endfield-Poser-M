@@ -17,14 +17,42 @@ static std::recursive_mutex g_poseMutex;
 
 static HANDLE g_logHandle = INVALID_HANDLE_VALUE;
 static CRITICAL_SECTION g_logLock;
+static const wchar_t *g_logPath = nullptr; // 打开失败时用来自动重试
+static DWORD g_logRetryAt = 0;             // 重试节流（GetTickCount）
+
+// 同一进程里可能同时存在多个插件实例（代理加载一次、插件管理器再加载一次）。
+// 所以日志文件必须允许别人同时读写，否则第二个实例打开必然失败，而失败后它的
+// 日志会被整段静默丢弃——排查问题时等于没有日志。
+// 用 FILE_APPEND_DATA 而不是 GENERIC_WRITE + 手动 seek：前者由系统保证每次都写到
+// 当时的文件末尾，多个实例同时写也不会互相覆盖。
+static void OpenLogAttempt() {
+  g_logHandle = CreateFileW(g_logPath, FILE_APPEND_DATA,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+}
 
 static void OpenLog(const wchar_t *path) {
   InitializeCriticalSection(&g_logLock);
-  g_logHandle = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (g_logHandle != INVALID_HANDLE_VALUE) {
-    SetFilePointer(g_logHandle, 0, nullptr, FILE_END);
+  g_logPath = path;
+  OpenLogAttempt();
+  if (g_logHandle == INVALID_HANDLE_VALUE) {
+    char msg[192] = {};
+    snprintf(msg, sizeof(msg),
+             "Endfield Poser: cannot open log (err=%lu); will retry\n",
+             GetLastError());
+    OutputDebugStringA(msg);
   }
+}
+
+// 打开失败（或写入中失效）后低频重试，最多每 5 秒一次，避免整个会话没有日志。
+static void RetryLogIfNeeded() {
+  if (g_logHandle != INVALID_HANDLE_VALUE || !g_logPath)
+    return;
+  DWORD now = GetTickCount();
+  if (g_logRetryAt && (DWORD)(now - g_logRetryAt) < 5000)
+    return;
+  g_logRetryAt = now;
+  OpenLogAttempt();
 }
 
 // 布料子系统的诊断（[CLOTH-*]）默认静默：那是调试仪表，量极大——实测一次会话就能写几十 MB，
@@ -32,8 +60,11 @@ static void OpenLog(const wchar_t *path) {
 static bool g_debugCloth = false;
 
 void Log(const char *fmt, ...) {
-  if (g_logHandle == INVALID_HANDLE_VALUE)
-    return;
+  if (g_logHandle == INVALID_HANDLE_VALUE) {
+    RetryLogIfNeeded();
+    if (g_logHandle == INVALID_HANDLE_VALUE)
+      return;
+  }
   if (!g_debugCloth && fmt && strncmp(fmt, "[CLOTH-", 7) == 0)
     return;
   EnterCriticalSection(&g_logLock);
@@ -46,8 +77,12 @@ void Log(const char *fmt, ...) {
     len = 0;
   buf[len] = '\n';
   len++;
-  DWORD written;
-  WriteFile(g_logHandle, buf, len, &written, NULL);
+  DWORD written = 0;
+  if (!WriteFile(g_logHandle, buf, len, &written, NULL)) {
+    // 句柄失效（被别的程序删除/改名等）时释放，交给下一次重试重新打开。
+    CloseHandle(g_logHandle);
+    g_logHandle = INVALID_HANDLE_VALUE;
+  }
   LeaveCriticalSection(&g_logLock);
 }
 

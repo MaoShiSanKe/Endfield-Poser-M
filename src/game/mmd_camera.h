@@ -1,6 +1,7 @@
 #pragma once
 #include "core/frame_driver.h"
 #include "core/game_hooks.h"
+#include "game/first_person.h"
 #include "math/mmd_camera.h"
 #include <string>
 #include <memory>
@@ -69,6 +70,18 @@ template<class T> static bool Read(void *method,void *object,T &value) {
 template<class T> static bool Write(void *method,void *object,T value) {
   void *args[]={&value};return Call(method,object,args);
 }
+// 相机的位置和朝向必须**一次性**写下去。
+// 分两次写会在两次调用之间留下"新位置 + 旧朝向"的中间态；游戏的视锥剔除是
+// job 化的，可能在那个缝里跑一次，于是这一帧的视锥是错的，建筑/部件被判成
+// 不可见——表现就是随机闪一下。有 SetPositionAndRotation 就优先用它。
+static bool PlaceTransform(void *transform,Vec3 position,Quat rotation) {
+  if (g_transform_set_positionAndRotation) {
+    void *args[]={&position,&rotation};
+    return Call(g_transform_set_positionAndRotation,transform,args);
+  }
+  return Write(g_transform_set_position,transform,position) &&
+         Write(g_transform_set_rotation,transform,rotation);
+}
 static void ReleaseRefs() {
   if (il2cpp_gchandle_free) {
     if (lease.cameraRef) il2cpp_gchandle_free(lease.cameraRef);
@@ -78,7 +91,33 @@ static void ReleaseRefs() {
   lease={};
   restorePending=false;driverPaused=false;
 }
+// ---- 第一人称隐藏头部：把 head 骨骼的 localScale 缩到 0（我们本来就是写骨骼的工具）----
+static void *fpHead = nullptr;
+static Vec3 fpHeadScale{1, 1, 1};
+static void RestoreHead() {
+  if (fpHead && UnityObjAlive(fpHead) && g_transform_set_localScale)
+    Write(g_transform_set_localScale, fpHead, fpHeadScale);
+  fpHead = nullptr;
+}
+static void HideHead(const first_person::Settings &s) {
+  if (!s.hideHead || !g_transform_get_localScale || !g_transform_set_localScale)
+    return;
+  void *head = first_person::HeadTransform();
+  if (!head)
+    return;
+  if (head != fpHead) {
+    RestoreHead();
+    Vec3 saved{1, 1, 1};
+    if (!Read(g_transform_get_localScale, head, saved))
+      return;
+    fpHead = head;
+    fpHeadScale = saved;
+  }
+  if (UnityObjAlive(fpHead))
+    Write(g_transform_set_localScale, fpHead, Vec3{1e-3f, 1e-3f, 1e-3f});
+}
 static bool Restore() {
+  RestoreHead();
   if (!lease.camera) return true;
   bool ok=true;
   if (UnityObjAlive(lease.camera)) {
@@ -97,7 +136,9 @@ static bool Restore() {
   else status=u8"等待恢复原相机设置";
   return ok;
 }
-static bool Capture(void *camera,const Request &sample) {
+// pauseDriver=false 时只保存相机状态，不动 CinemachineBrain：第一人称要靠游戏
+// 相机继续吃鼠标来环视，一旦把驱动停掉视角就死了。
+static bool Capture(void *camera,const Request &sample,bool pauseDriver) {
   if (!UnityObjAlive(camera) || !il2cpp_gchandle_new || !il2cpp_gchandle_free) return false;
   void *transform=nullptr;
   if (!Call(g_component_get_transform,camera,nullptr,&transform) || !UnityObjAlive(transform)) return false;
@@ -113,7 +154,7 @@ static bool Capture(void *camera,const Request &sample) {
   saved.transformRef=il2cpp_gchandle_new(transform,false);
   // Discover once per lease. Use Behaviour's verified bool property and retain
   // its exact original value, including an already disabled camera driver.
-  if(brainClass && getDriverEnabled && setDriverEnabled && g_component_get_gameObject &&
+  if(pauseDriver && brainClass && getDriverEnabled && setDriverEnabled && g_component_get_gameObject &&
      g_gameObject_GetComponent && il2cpp_class_get_type && il2cpp_type_get_object) {
     void *go=nullptr,*driver=nullptr;
     void *type=il2cpp_type_get_object(il2cpp_class_get_type(brainClass));void *args[]={type};
@@ -126,9 +167,11 @@ static bool Capture(void *camera,const Request &sample) {
   }
   lease=saved;
   if (!saved.cameraRef || !saved.transformRef) {ReleaseRefs();return false;}
-  restorePending=true;
-  if(lease.driver && !Write(setDriverEnabled,lease.driver,false)) {desiredActive=false;Restore();return false;}
-  driverPaused=lease.driver!=nullptr;
+  if (pauseDriver) {
+    restorePending=true;
+    if(lease.driver && !Write(setDriverEnabled,lease.driver,false)) {desiredActive=false;Restore();return false;}
+    driverPaused=lease.driver!=nullptr;
+  }
   Log("[MMD-CAMERA] acquired camera=%p session=%llu",camera,(unsigned long long)saved.session);
   return true;
 }
@@ -138,9 +181,38 @@ static bool Apply(void *camera,void *transform,const mmd::CameraPose &p) {
   ok=Write(setOrtho,camera,!p.perspective)&&ok;
   ok=Write(setFov,camera,p.fov)&&ok;
   ok=Write(setSize,camera,p.orthoSize)&&ok;
-  ok=Write(g_transform_set_position,transform,p.position)&&ok;
-  ok=Write(g_transform_set_rotation,transform,p.rotation)&&ok;
+  ok=PlaceTransform(transform,p.position,p.rotation)&&ok;
   return ok;
+}
+// 第一人称：借用游戏相机，只把主相机搬到当前角色头部（朝向由游戏自己写）。
+// 返回 true 表示本帧已由第一人称处理，调用方不需要再 Restore。
+static bool PumpFirstPerson(void *camera) {
+  if (!first_person::desired.load()) return false;
+  const first_person::Settings s=first_person::Snapshot();
+  RestoreHead(); // 每帧先还原；只有真正接管相机后才重新隐藏头部
+  if (!UnityObjAlive(camera)) { status=u8"等待游戏主相机"; return true; }
+  if (lease.camera && lease.camera!=camera && !Restore()) return true;
+  bool fresh=false;
+  if (!lease.camera) {
+    Request fp{};
+    if (!Capture(camera,fp,false)) { status=u8"无法保存原相机状态，未接管"; return true; }
+    fresh=true;
+  }
+  if (!UnityObjAlive(lease.transform)) { Restore(); status=u8"相机实例已失效"; return true; }
+  Vec3 position; Quat rotation;
+  if (!first_person::Solve(lease.transform,s,position,rotation)) {
+    if (fresh) Restore(); // 还没拿到头骨，别占着相机
+    status=u8"第一人称：等待角色头骨";
+    return true;
+  }
+  if (!PlaceTransform(lease.transform,position,rotation)) {
+    Restore(); status=u8"第一人称相机写入失败，已退出接管";
+    return true;
+  }
+  lease.lastPose.position=position;lease.lastPose.rotation=rotation;lease.hasPose=true;
+  HideHead(s);
+  ++applied; status=u8"第一人称（借用游戏相机）";
+  return true;
 }
 static void Pump(void *camera,const Request &sample) {
   ++callbacks;lastCallback=FrameNow();
@@ -148,9 +220,12 @@ static void Pump(void *camera,const Request &sample) {
               sample.actor==g_charAnimator && UnityObjAlive(sample.actor) &&
               (!sample.followActor || UnityObjAlive(sample.followActor));
   if (!active) {
+    if (PumpFirstPerson(camera)) return;
+    RestoreHead();
     if (Restore()) status=u8"镜头已停止，原相机已恢复";
     return;
   }
+  RestoreHead(); // MMD 镜头优先：第一人称让位时把头还回去
   const auto &p=sample.pose;
   auto finite=[](Vec3 v){return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);};
   if (!finite(p.position) || !std::isfinite(p.fov) || !std::isfinite(p.orthoSize) ||
@@ -160,7 +235,7 @@ static void Pump(void *camera,const Request &sample) {
   if (lease.camera && (lease.camera!=camera || lease.session!=sample.session))
     if (!Restore()) return;
   if (!UnityObjAlive(camera)) {status=u8"等待游戏主相机";return;}
-  if (!lease.camera && !Capture(camera,sample)) {status=u8"无法保存原相机状态，未接管";return;}
+  if (!lease.camera && !Capture(camera,sample,true)) {status=u8"无法保存原相机状态，未接管";return;}
   if (!UnityObjAlive(lease.transform)) {Restore();status=u8"相机实例已失效";return;}
   if (!Apply(camera,lease.transform,p)) {desiredActive=false;Restore();status=u8"相机写入失败，已退出接管";return;}
   lease.lastPose=p;lease.hasPose=true;

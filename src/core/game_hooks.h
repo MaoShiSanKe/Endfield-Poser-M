@@ -118,11 +118,13 @@ static void *g_transform_get_localRotation = nullptr;
 static void *g_transform_set_localRotation = nullptr;
 static void *g_transform_get_localPosition = nullptr;
 static void *g_transform_get_localScale = nullptr;
+static void *g_transform_set_localScale = nullptr; // 局部缩放（第一人称隐藏头部）
 static void *g_transform_set_localPosition = nullptr;
 static void *g_transform_get_position = nullptr;
 static void *g_transform_set_position = nullptr; // 世界平移（自由相机写）
 static void *g_transform_get_rotation = nullptr; // 世界旋转（gizmo 相机朝向用）
 static void *g_transform_set_rotation = nullptr; // 世界旋转（自由相机写）
+static void *g_transform_set_positionAndRotation = nullptr; // 一次写位置+朝向（相机用，避免中间态）
 static void *g_transform_get_childCount = nullptr;
 static void *g_transform_GetChild = nullptr;
 static void *g_transform_get_parent = nullptr;
@@ -188,6 +190,7 @@ static void ResolveGameApi() {
     if (trClass) {
       g_transform_get_localToWorldMatrix = FindMethod(trClass, "get_localToWorldMatrix", 0);
       g_transform_get_localScale = FindMethod(trClass, "get_localScale", 0);
+      g_transform_set_localScale = FindMethod(trClass, "set_localScale", 1);
       g_transform_get_localRotation =
           FindMethod(trClass, "get_localRotation", 0);
       g_transform_set_localRotation =
@@ -200,6 +203,8 @@ static void ResolveGameApi() {
       g_transform_set_position = FindMethod(trClass, "set_position", 1);
       g_transform_get_rotation = FindMethod(trClass, "get_rotation", 0);
       g_transform_set_rotation = FindMethod(trClass, "set_rotation", 1);
+      g_transform_set_positionAndRotation =
+          FindMethod(trClass, "SetPositionAndRotation", 2);
       g_transform_get_childCount = FindMethod(trClass, "get_childCount", 0);
       g_transform_GetChild = FindMethod(trClass, "GetChild", 1);
       g_transform_get_parent = FindMethod(trClass, "get_parent", 0);

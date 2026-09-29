@@ -320,21 +320,24 @@ static void RefreshCharacterBones() {
 }
 
 // ---- 主面板：控制（冻结）+ 姿态编辑（Task 3.1）----
+// 第一人称时不再绘制骨骼/控制器叠加层：镜头里只留画面本身。
+static bool FirstPersonView() { return first_person::desired.load(); }
+
 static void DrawPoserGuiBody() {
   ImGuizmo::BeginFrame(); // ImGuizmo 每帧初始化（draw list / 内部窗口），否则轮盘不绘制
   __try {
-    DrawSkeletonOverlay();
+    if (!FirstPersonView()) DrawSkeletonOverlay();
   } __except (1) {
     Log("[POSER] DrawSkeletonOverlay exception code=0x%X", GetExceptionCode());
   }
   __try {
-    HandleRigClick();
+    if (!FirstPersonView()) HandleRigClick();
   } __except (1) {
     Log("[POSER] HandleRigClick exception code=0x%X", GetExceptionCode());
   }
   __try {
-    if (!MmdOwnsPose()) IkSolveAll();        // 冻结态解算四肢 IK（启用中的控制器）
-    if (!MmdOwnsPose()) DrawIkControllers(); // 目标点渲染 + 选中 + 命中标记
+    if (!FirstPersonView() && !MmdOwnsPose()) IkSolveAll();        // 冻结态解算四肢 IK（启用中的控制器）
+    if (!FirstPersonView() && !MmdOwnsPose()) DrawIkControllers(); // 目标点渲染 + 选中 + 命中标记
   } __except (1) {
     Log("[POSER] IK controllers exception code=0x%X", GetExceptionCode());
   }
@@ -408,6 +411,32 @@ static void DrawPoserGuiBody() {
     if (ImGui::IsItemHovered())
       ImGui::SetTooltip(u8"\u5b9e\u9a8c\u6027\uff1a\u53ef\u4ee5\u9009\u4e2d / \u62d6\u52a8"
                         u8"\u624b\u67c4\uff1b\u9aa8\u9abc\u8ddf\u968f\u5c1a\u672a\u5b8c\u6210");
+
+    // ---- 第一人称视角（借用游戏相机；MMD 镜头优先）----
+    if (ImGui::Checkbox(u8"第一人称视角", &first_person::settings.enabled)) {
+      first_person::Publish();
+      Log("[FP] first-person %s", first_person::settings.enabled ? "ON" : "OFF");
+    }
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip(u8"把相机放到当前角色头部：鼠标环视、WASD 移动仍由游戏自己控制。\n"
+                        u8"MMD 镜头播放时自动让位；关闭即还原原相机。");
+    if (first_person::settings.enabled) {
+      ImGui::Indent();
+      if (ImGui::Checkbox(u8"隐藏头部（缩小 head 骨骼）", &first_person::settings.hideHead))
+        first_person::Publish();
+      if (ImGui::SliderFloat3(u8"眼睛偏移（右/上/前）", &first_person::settings.offset.x,
+                              -0.6f, 0.6f, "%.3f"))
+        first_person::Publish();
+      if (ImGui::SliderFloat(u8"俯仰修正", &first_person::settings.pitch, -45.f, 45.f, "%.1f deg"))
+        first_person::Publish();
+      if (ImGui::SmallButton(u8"复位视角")) {
+        first_person::settings.offset = first_person::kDefaultOffset;
+        first_person::settings.pitch = 0.f;
+        first_person::Publish();
+      }
+      ImGui::TextDisabled("%s", mmd_camera::status.load());
+      ImGui::Unindent();
+    }
     // ---- 窗口开关集中在这里 ----
     // 勾上就出现对应窗口；窗口右上角的 × 也能关（两者是同一个状态）。
     if (ImGui::CollapsingHeader(u8"\u7a97\u53e3")) {
@@ -527,13 +556,13 @@ static void DrawPoserGuiBody() {
                          ImGuiWindowFlags_NoSavedSettings |
                          ImGuiWindowFlags_NoInputs)) {
       __try {
-        if (!MmdOwnsPose()) DrawBoneRotationGizmo();
+        if (!FirstPersonView() && !MmdOwnsPose()) DrawBoneRotationGizmo();
       } __except (1) {
         Log("[POSER] DrawBoneRotationGizmo exception code=0x%X",
             GetExceptionCode());
       }
       __try {
-        if (!MmdOwnsPose()) DrawIkGizmo(); // 控制器目标点的平移手柄
+        if (!FirstPersonView() && !MmdOwnsPose()) DrawIkGizmo(); // 控制器目标点的平移手柄
       } __except (1) {
         Log("[POSER] DrawIkGizmo exception code=0x%X", GetExceptionCode());
       }
