@@ -45,7 +45,7 @@ $required = @(
   (Join-Path $root 'licenses\cloth-upstream.txt'),
   (Join-Path $root 'licenses\Brotli.txt'),
   (Join-Path $root 'build\cloth_resources.exe'),
-  (Join-Path $root '安全安装.bat'),
+  (Join-Path $root 'packaging\安全安装.bat'),
   (Join-Path $root 'tools\deploy.ps1'),
   (Join-Path $root 'tools\character_face_resources.ps1'),
   (Join-Path $root 'docs\mmd-player.md'),
@@ -129,7 +129,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $stage 'plugin') | Out-Null
 Copy-Item -LiteralPath (Join-Path $root 'licenses') -Destination (Join-Path $stage 'licenses') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE')            -Destination (Join-Path $stage 'LICENSE') -Force
 Copy-Item -LiteralPath (Join-Path $root 'THIRD_PARTY_NOTICES') -Destination (Join-Path $stage 'THIRD_PARTY_NOTICES') -Force
-Copy-Item -LiteralPath (Join-Path $root '安全安装.bat')         -Destination (Join-Path $stage '安全安装.bat') -Force
+Copy-Item -LiteralPath (Join-Path $root 'packaging\安全安装.bat') -Destination (Join-Path $stage '安全安装.bat') -Force
 Copy-Item -LiteralPath $noticeSrc                              -Destination (Join-Path $stage '使用须知.md') -Force
 Copy-Item -LiteralPath $tutorialSrc                            -Destination (Join-Path $stage '使用教程.md') -Force
 Copy-Item -LiteralPath $notesSrc                               -Destination (Join-Path $stage '安装说明.txt') -Force

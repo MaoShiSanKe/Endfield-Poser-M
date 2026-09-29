@@ -14,6 +14,10 @@
 
 ## 快速开始
 
+> ⚠️ **本仓库是源码，不是安装包**。GitHub 页面上 "Source code" 下载的是未编译的代码，
+> 里面没有 DLL、也没有安装脚本。安装请在 [Releases](https://github.com/honxi1/Endfield-Poser/releases)
+> 下载 `EndfieldPoser-v*.zip`。
+
 | 包内文件 | 放到 |
 |---|---|
 | `d3dcompiler_47.dll` | 游戏根目录（**先备份游戏自带的那份**） |
