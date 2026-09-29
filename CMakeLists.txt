@@ -101,7 +101,6 @@ if(WIN32)
     src/cloth/diagnostics/cloth_shoulder_trace.h
     src/cloth/native/cloth_native_runtime.h
     src/cloth/shoulder/cloth_shoulder_drive.h
-    src/core/mmd_countdown_hud.h
     src/core/web_server.h
     src/editor/panel_mmd_squad.h
     src/game/mmd_avatar.h
@@ -118,13 +117,12 @@ if(WIN32)
     src/math/mmd_avatar.h
     src/math/mmd_calibration.h
     src/math/mmd_camera_profile.h
-    src/math/mmd_countdown.h
     src/math/mmd_squad.h
     src/math/mmd_terrain.h
     src/poser.rc
     src/config.h
     src/core/user_agreement.h src/editor/panel_agreement.h
-    src/math/mmd_motion.h src/math/mmd_rig.h src/math/mmd_retarget.h src/math/mmd_props.h src/math/mmd_adaptation.h src/math/mmd_amplitude.h
+    src/math/mmd_motion.h src/math/mmd_rig.h src/math/mmd_retarget.h src/math/mmd_props.h src/math/mmd_adaptation.h src/math/mmd_amplitude.h src/math/mmd_arm_twist.h
     src/game/mmd_player.h src/game/mmd_io.h src/game/frozen_grip.h src/editor/panel_mmd.h src/editor/panel_mmd_adaptation.h
     src/core/game_hooks.h
     src/core/gui_overlay.h src/core/build_features.h
