@@ -26,7 +26,6 @@
 #include "config.h"   // g_guiToggleVK / g_screenshotVK / 相机速度
 #include "user_agreement.h"
 #include "math/hotkey_state.h"
-#include "mmd_countdown_hud.h"
 static bool g_overlayPanelsDraw=true;
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
@@ -730,15 +729,7 @@ static DWORD GuiThreadBody(LPVOID) {
     // 默认模式：只有按住 Alt（或拖拽中）才显示覆盖层，其余时间整窗隐藏。
     g_overlayPanelsDraw=g_guiVisible &&
       (g_clickThrough || altHeld || g_inputDragging || !poser_agreement::Allowed());
-    const int countdown=g_mmdCountdownDisplay.load(std::memory_order_acquire);
-    static int lastCountdown=0;
-    if(lastCountdown!=countdown) {
-      lastCountdown=countdown;nextDrawTick=0;
-#if POSER_ENABLE_LAYERED_OVERLAY
-      g_layerForcePresent=true;
-#endif
-    }
-    bool shouldShow = !IsIconic(g_gameHwnd) && (g_overlayPanelsDraw || countdown>0);
+    bool shouldShow = !IsIconic(g_gameHwnd) && g_overlayPanelsDraw;
     static int s_showLogged = -1;
     if ((int)shouldShow != s_showLogged) {
       s_showLogged = (int)shouldShow;
