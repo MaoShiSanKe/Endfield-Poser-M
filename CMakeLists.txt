@@ -131,6 +131,7 @@ if(WIN32)
     src/game/mmd_audio.h src/math/mmd_audio_sync.h
     src/game/mmd_camera.h src/math/mmd_camera.h src/game/eye_gaze.h src/math/eye_gaze.h
     src/game/first_person.h
+    src/math/mmd_thumb.h resources/character-thumbs/builtin.h
     src/math/cloth_state.h src/game/cloth.h src/game/cloth_init.h
     src/game/skeleton.h src/game/freeze.h src/game/accessory.h src/game/morph.h src/game/smc_morph.h src/game/smc_automation.h
     src/math/character_face.h src/math/face_geometry.h src/math/mmd_face_controls.h

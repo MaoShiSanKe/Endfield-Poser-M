@@ -6,6 +6,7 @@
 #include "game/smc_morph.h"
 #include "math/mmd_props.h"
 #include "math/mmd_retarget.h"
+#include "math/mmd_thumb.h"
 #include "math/mmd_calibration.h"
 #include "game/mmd_avatar.h"
 #include "game/mmd_terrain.h"
@@ -139,6 +140,19 @@ static std::filesystem::path MmdConfigDirectory() {
   GetModuleFileNameW(GetModuleHandleW(L"poser.dll"), p, 32768);
   return std::filesystem::path(p).parent_path() / L"mmd";
 }
+static bool MmdMigrateBodyCalibrations() {
+  static bool attempted=false,ready=false;
+  if(attempted)return ready;
+  attempted=true;
+  try {
+    const size_t archived=mmd::ArchiveLegacyBodyCalibrations(MmdConfigDirectory());
+    if(archived)Log("[MMD] retired %zu legacy body calibrations; automatic Avatar calibration will be used",archived);
+    ready=true;
+  } catch(const std::exception &e) {
+    Log("[MMD] body calibration backup failed; old caches disabled, saving deferred until restart: %s",e.what());
+  }
+  return ready;
+}
 static mmd::RetargetProfile MmdCurrentProfile() {
   mmd::RetargetProfile p;
   p.model = CurrentCharModelKey();
@@ -161,12 +175,20 @@ static mmd::RetargetProfile MmdCurrentProfile() {
 }
 static std::string s_mmdCalibrationDetail;
 static bool MmdBindCalibration(mmd::RetargetProfile &profile) {
-  return mmd_avatar::Calibrate(g_charAnimator,profile,s_mmdCalibrationDetail);
+  const bool ready=mmd_avatar::Calibrate(g_charAnimator,profile,s_mmdCalibrationDetail);
+  // Keep the original failure visible even when a saved manual pose succeeds.
+  // Suppress repeated identical failures from repeated play/calibration clicks.
+  static std::string lastFailure;
+  const auto failure=ready?std::string{}:profile.model+": "+s_mmdCalibrationDetail;
+  if(!ready&&failure!=lastFailure)Log("[MMD-AVATAR] calibration failed: %s",failure.c_str());
+  lastFailure=failure;
+  return ready;
 }
 static uint64_t s_mmdCalibrationSerial=0;
 static void MmdSaveCalibration(const mmd::RetargetProfile &p) {
+  if(!MmdMigrateBodyCalibrations())throw std::runtime_error(u8"旧身体校准备份失败，请检查目录权限后重启；本次仍使用自动校准");
   using nlohmann::json;
-  json j = {{"version", 3},
+  json j = {{"version", mmd::BodyCalibrationVersion},
             {"model", p.model},
             {"fingerprint", p.fingerprint},
             {"bones", json::array()}};
@@ -206,18 +228,20 @@ static void MmdSaveCalibration(const mmd::RetargetProfile &p) {
   ++s_mmdCalibrationSerial;
 }
 static bool MmdLoadCalibration(mmd::RetargetProfile &p) {
+  if(!MmdMigrateBodyCalibrations())return false;
   auto load=[&](const std::filesystem::path &path) {
     try {
       if(std::filesystem::file_size(path)>4*1024*1024)return false;
       std::ifstream f(path);nlohmann::json j;f>>j;
+      if(!mmd::CurrentBodyCalibration(j))return false;
       if(j.value("model","")!=p.model)return false;
       return mmd::RestoreBodyCalibration(mmd::ReadCalibration(j),p);
     }catch(...){return false;}
   };
   const auto directory=MmdConfigDirectory(),exact=directory/(p.fingerprint+".rig.json");
   if(load(exact))return true;
-  // Preserve version-3 user files. A weapon or effect change can alter the old
-  // whole-hierarchy fingerprint while the actual calibrated body is unchanged.
+  // Only use calibrations generated after the native finger zero reset. Props
+  // can change the hierarchy fingerprint without changing the calibrated body.
   try {
     std::vector<std::pair<std::filesystem::file_time_type,std::filesystem::path>> candidates;
     for(const auto &entry:std::filesystem::directory_iterator(directory)) {
@@ -347,6 +371,8 @@ struct MmdPlayer {
   mmd::IkMode ikMode = mmd::IkMode::FollowMotion;
   mmd::MotionAmplitude amplitude;
   mmd::RetargetProfile profile;
+  mmd::RetargetProfile playbackProfile;
+  std::string thumbStatus;
   mmd::Retargeter mapper;
   mmd::Timeline timeline;
   mmd::AudioPlayer audio;
@@ -956,6 +982,16 @@ static bool MmdPrepareProfile() {
   m.profileAnimator = g_charAnimator;
   return true;
 }
+static std::string MmdPrepareThumbs(mmd::RetargetProfile &profile,bool enabled) {
+  if(!enabled)return u8"拇指：游戏原生基准";
+  const auto *reference=mmd::FindThumbReference(character_face::ModelKey(profile.model));
+  if(!reference)return u8"拇指：无对应 PMX 校准，使用原生基准";
+  const auto result=mmd::CalibrateThumbs(profile,reference);
+  if(!result.joints)return u8"拇指：骨架不兼容，使用原生基准";
+  auto status=std::string(u8"拇指：")+reference->label+u8" PMX（"+std::to_string(result.joints)+u8"/6 节）";
+  if(result.joints<6)status+=u8"；其余关节保留原生相对姿态";
+  return status;
+}
 static void MmdCaptureSession() {
   auto &m = g_mmd;
   auto &s = m.session;
@@ -1128,6 +1164,8 @@ static void MmdCharacterChanging(void *nextEntity=nullptr) {
   m.profileRevision = -1;
   m.profileAnimator = nullptr;
   m.profile = mmd::RetargetProfile{};
+  m.playbackProfile = mmd::RetargetProfile{};
+  m.thumbStatus.clear();
   m.calibrationStatus = u8"角色已切换，等待新角色骨架；原角色校准仍保存在文件中";
   m.status = u8"切换角色已停止动作，等待新角色骨架";
 }
@@ -1286,8 +1324,10 @@ static bool MmdStart() {
     m.profileRevision = -1;
   } else if (!MmdPrepareProfile())
     return false;
+  m.playbackProfile=m.profile;
+  m.thumbStatus=m.clip.bones.empty()?std::string{}:MmdPrepareThumbs(m.playbackProfile,m.adaptation.characterThumbs);
   if (!m.clip.bones.empty() || !m.clip.morphs.empty())
-    m.mapper.bind(m.rig, m.clip, m.profile, mmd::AdaptedRoles(m.adaptation), m.adaptation.tracks);
+    m.mapper.bind(m.rig, m.clip, m.playbackProfile, mmd::AdaptedRoles(m.adaptation), m.adaptation.tracks);
   if (!m.clip.bones.empty() && m.autoScale)
     m.scale = m.mapper.suggestedScale;
   MmdCaptureSession();
@@ -1298,8 +1338,9 @@ static bool MmdStart() {
   m.timeline.play(MmdNow());
   m.status = u8"播放中";
   MmdApplyFrame();
-  Log("[MMD] playing %s, actor=%p scale=%.5f arm_twist_channels=%zu/4", m.file.c_str(), g_charAnimator,
-      m.scale,m.mapper.armTwistChannels());
+  Log("[MMD] playing %s, actor=%p scale=%.5f arm_twist_channels=%zu/4 native_fingers=%zu/30", m.file.c_str(), g_charAnimator,
+      m.scale,m.mapper.armTwistChannels(),m.mapper.nativeFingerCount());
+  if(!m.thumbStatus.empty())Log("[MMD-THUMB] %s",m.thumbStatus.c_str());
   return true;
 }
 static void MmdSeekOrStart(double seconds) {
@@ -1317,6 +1358,7 @@ static bool MmdWantsClothPlayback() {
 static void MmdTick() {
   try {
     auto &m = g_mmd;
+    MmdMigrateBodyCalibrations();
     MmdLoadFaceSettings();
     MmdPollCharacterFaces();
     MmdPollLoad();
