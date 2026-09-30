@@ -560,6 +560,12 @@ static void DrawMmdPanel() {
         if (ImGui::CollapsingHeader(u8"角色校准")) {
           ImGui::TextWrapped("%s", m.calibrationStatus.c_str());
           ImGui::BeginDisabled(m.session.active || m.loading);
+          bool thumbs=m.adaptation.characterThumbs;
+          if(ImGui::Checkbox(u8"按角色 PMX 校准拇指（含归零）",&thumbs)) {
+            auto next=m.adaptation;next.characterThumbs=thumbs;
+            if(MmdApplyAdaptation(next,m.sourcePreset))m.thumbStatus.clear();
+          }
+          ImGui::TextDisabled(u8"单人、多人共用；可随适配预设保存。关闭后恢复原生基准。");
           if (ImGui::Button(u8"重新自动适配")) {
             m.profileRevision = -1;
             MmdPrepareProfile();
@@ -568,6 +574,7 @@ static void DrawMmdPanel() {
           if (ImGui::Button(u8"备用手动 T 姿"))
             MmdBeginCalibration();
           ImGui::EndDisabled();
+          if(!m.thumbStatus.empty())ImGui::TextWrapped("%s",m.thumbStatus.c_str());
         }
         DrawMmdAdaptationPanel();
         if (ImGui::CollapsingHeader(u8"诊断与导入报告")) {
