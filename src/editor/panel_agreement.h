@@ -14,6 +14,7 @@
 // 否则会显示成方框。加字时可先在 imgui_draw.cpp 的常用字表里对一下。
 
 #include "imgui.h"
+#include "editor/panel_scale.h"
 #include "config.h" // g_termsAcceptedVersion / SaveConfigValue
 
 #define POSER_TERMS_VERSION 1
@@ -72,7 +73,9 @@ static int DrawAgreementDialog(const char *toggleHotkey, bool reviewMode) {
   ImGuiIO &io = ImGui::GetIO();
   ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
                           ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-  ImGui::SetNextWindowSize(ImVec2(620.0f, 480.0f), ImGuiCond_Always);
+  const auto available = poser_ui::AvailableSize();
+  ImGui::SetNextWindowSize(ImVec2((std::min)(poser_ui::Scale(620), available.x),
+                                 (std::min)(poser_ui::Scale(480), available.y)), ImGuiCond_Always);
   ImGui::Begin(reviewMode ? u8"用户协议与免责声明（已同意）"
                           : u8"用户协议与免责声明",
                nullptr,
@@ -103,7 +106,7 @@ static int DrawAgreementDialog(const char *toggleHotkey, bool reviewMode) {
   }
 
   // 高度留出下面那几行（输入提示 / 读到底提示 / 按钮行）
-  ImGui::BeginChild("##terms", ImVec2(0, -104.0f), ImGuiChildFlags_Borders);
+  ImGui::BeginChild("##terms", ImVec2(0, -poser_ui::Scale(104)), ImGuiChildFlags_Borders);
   ImGui::PushTextWrapPos(0.0f);
   for (const char *line : kTermsLines) {
     if (line[0] == 0) {
@@ -137,18 +140,18 @@ static int DrawAgreementDialog(const char *toggleHotkey, bool reviewMode) {
     ImGui::TextDisabled(u8"请把上面的条款读到底，「同意并继续」才会变成可点。");
 
   if (reviewMode) {
-    if (ImGui::Button(u8"关闭", ImVec2(160.0f, 0.0f)))
+    if (ImGui::Button(u8"关闭", poser_ui::Size(160, 0)))
       result = 1;
   } else {
     if (!s_reachedBottom)
       ImGui::BeginDisabled();
-    if (ImGui::Button(u8"同意并继续", ImVec2(160.0f, 0.0f)))
+    if (ImGui::Button(u8"同意并继续", poser_ui::Size(160, 0)))
       result = 1;
     if (!s_reachedBottom)
       ImGui::EndDisabled();
 
     ImGui::SameLine();
-    if (ImGui::Button(u8"不同意（本次不加载）", ImVec2(180.0f, 0.0f)))
+    if (ImGui::Button(u8"不同意（本次不加载）", poser_ui::Size(180, 0)))
       result = -1;
   }
 

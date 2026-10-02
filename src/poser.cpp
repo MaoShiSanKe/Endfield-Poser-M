@@ -30,6 +30,7 @@ static void RebuildCapturedCharacter();
 #include "editor/panel_morph.h"
 #include "editor/panel_mmd.h"
 #include "editor/panel_mmd_squad.h"
+#include "editor/panel_mmd_motion_calibration.h"
 #include "editor/panel_agreement.h"
 #include "game/cloth_init.h"
 #include "config.h"
@@ -357,11 +358,7 @@ static void DrawPoserGuiBody() {
   } __except (1) {
     Log("[POSER] IK controllers exception code=0x%X", GetExceptionCode());
   }
-  ImGui::SetNextWindowPos(ImVec2(10, 10), PanelPositionCondition());
-  // 见 panel_bones.h：AlwaysAutoResize 与 SetNextItemWidth(-1) 并用时需要最小宽度，
-  // 否则窗口宽度塌陷、右侧标签（步长等）被挤出可视区。
-  ImGui::SetNextWindowSizeConstraints(ImVec2(340.0f, 100.0f),
-                                      ImVec2(FLT_MAX, FLT_MAX));
+  poser_ui::NextPanel("Endfield Poser", {10, 10}, {}, {340, 100}, g_resetPanelLayoutFrames > 0);
   if (ImGui::Begin("Endfield Poser", nullptr,
                    ImGuiWindowFlags_NoCollapse |
                        ImGuiWindowFlags_AlwaysAutoResize |
@@ -409,6 +406,7 @@ static void DrawPoserGuiBody() {
       g_resetPanelLayoutFrames = 2;
     }
     ImGui::TextDisabled(u8"按住 Alt 操作面板；拖动标题栏调整布局");
+    poser_ui::DrawDisplaySettings();
     ImGui::Separator();
     ImGui::TextDisabled(g_charAnimator?u8"当前角色已就绪":u8"等待进入角色场景");
     ImGui::Checkbox(u8"\u663e\u793a\u9aa8\u9abc", &g_showBones);
@@ -589,10 +587,7 @@ static void DrawPoserGuiBody() {
 
   // 姿态预设库（独立窗口；由主面板「窗口」组开关控制）
   if (g_showLibrary) {
-    ImGui::SetNextWindowPos(ImVec2(340, 500), LayoutCond());
-    // 与主面板一致：宽度有下限、高度自适应，避免内容被截断
-    ImGui::SetNextWindowSizeConstraints(ImVec2(340.0f, 120.0f),
-                                        ImVec2(FLT_MAX, FLT_MAX));
+    poser_ui::NextPanel(u8"姿态库", {340, 500}, {}, {340, 120}, g_resetPanelLayoutFrames > 0);
     if (ImGui::Begin(u8"\u59ff\u6001\u5e93", &g_showLibrary,
                      ImGuiWindowFlags_NoCollapse |
                          ImGuiWindowFlags_AlwaysAutoResize |
@@ -604,10 +599,9 @@ static void DrawPoserGuiBody() {
 
   // 形态键面板（面部 BlendShape；由主面板「窗口」组开关控制）
   if (g_showMorph) {
-    ImGui::SetNextWindowPos(ImVec2(680, 10), LayoutCond());
     // 形态键面板内部用 BeginChild(size=(0,0)) 填满可用空间，和 AlwaysAutoResize 冲突
     // （子区域会塌成 0 → 内容看不见），所以这里保持固定初始尺寸、允许手动调整。
-    ImGui::SetNextWindowSize(ImVec2(360, 320), LayoutCond());
+    poser_ui::NextPanel(u8"表情###\u5f62\u6001\u952e", {680, 10}, {360, 320}, {300, 240}, g_resetPanelLayoutFrames > 0);
     if (ImGui::Begin(u8"\u5f62\u6001\u952e", &g_showMorph,
                      ImGuiWindowFlags_NoCollapse)) {
       DrawMorphPanel();
@@ -622,6 +616,7 @@ static void DrawPoserGuiBody() {
   DrawMmdPanel();
   DrawRosterPanel();
   DrawMmdSquadPanel();
+  DrawMmdMotionCalibrationPanel();
   if (g_resetPanelLayoutFrames > 0) --g_resetPanelLayoutFrames;
 }
 

@@ -420,7 +420,7 @@ static void RosterService() {
 static void DrawRosterPanel() {
   if (!g_showRoster)
     return;
-  ImGui::SetNextWindowSize(ImVec2(300.0f, 260.0f), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(poser_ui::Size(300, 260), ImGuiCond_FirstUseEver);
   if (!ImGui::Begin(u8"\u89d2\u8272", &g_showRoster)) {
     ImGui::End();
     return;
