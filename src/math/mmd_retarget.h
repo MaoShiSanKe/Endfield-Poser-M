@@ -2,6 +2,7 @@
 #include "math/ik_two_bone.h"
 #include "math/mmd_rig.h"
 #include "math/mmd_amplitude.h"
+#include "math/mmd_motion_calibration.h"
 #include "math/mmd_arm_twist.h"
 
 namespace mmd {
@@ -97,6 +98,17 @@ inline Quat BodyBasis(Vec3 left, Vec3 right, Vec3 hip, Vec3 head) {
   y = Norm(Cross(z, x));
   return Basis(x, y, z);
 }
+inline bool PalmBasis(Vec3 wrist, Vec3 middle, Vec3 index, Vec3 little, Quat &frame) {
+  Vec3 forward = middle - wrist, across = index - little;
+  if (!std::isfinite(Len(forward)) || !std::isfinite(Len(across)) ||
+      Len(forward) < 1e-5f || Len(across) < 1e-5f) return false;
+  forward = Norm(forward);
+  across = across - forward * Dot(across, forward);
+  if (Len(across) < 1e-5f) return false;
+  across = Norm(across);
+  frame = Basis(forward, across, Cross(forward, across));
+  return true;
+}
 struct TargetBone {
   std::string name;
   int parent = -1, role = -1;
@@ -110,6 +122,10 @@ struct RetargetProfile {
   std::string model, fingerprint;
   std::vector<TargetBone> bones;
   std::array<int, 55> roles;
+  // Playback-only character PMX palm axes in VMD model coordinates.
+  // Never persist these over the native Avatar calibration.
+  std::array<Quat, 2> thumbSourcePalm;
+  std::array<bool, 2> thumbSourcePalmValid{};
   RetargetProfile() { roles.fill(-1); }
   void globals() {
     roles.fill(-1);
@@ -283,6 +299,8 @@ struct SampledPose {
   std::vector<bool> write;
   Vec3 rootOffset;
   std::array<bool, 2> legIkActive{false, false};
+  // 0: no adjustment, 1: applied, 2: unreachable endpoint clamped, -1: unmapped.
+  std::array<int, 4> sizingStatus{};
 };
 class Retargeter {
   const RigDefinition *source_ = nullptr;
@@ -295,7 +313,7 @@ class Retargeter {
   std::vector<Quat> neutralLocal_;
   std::vector<ArmTwistBinding> armTwists_;
   std::array<bool,30> nativeFingers_{};
-  std::array<Quat,30> fingerBasis_; // Source model space -> native parent bind space.
+  std::array<Quat,30> fingerBasis_; // Source motion axes -> calibrated parent bind space.
   Quat basis_;
   void world() {
     for (size_t i = 0; i < target_->bones.size(); i++) {
@@ -321,18 +339,91 @@ class Retargeter {
     output.write[i] = true;
     world();
   }
-  void applyAmplitude(const MotionAmplitude &amplitude) {
+  void applyMotionCalibration(const MotionCalibration &calibration) {
+    output.sizingStatus.fill(0);
+    if (!calibration.enabled) return;
+    for (int limb = 0; limb < 4; ++limb) {
+      const auto &s = calibration.limbs[limb];
+      if (s.identity()) continue;
+      int ar = (limb < 2 ? 13 : 1) + (limb & 1), br = ar + 2, cr = ar + 4;
+      int a = target_->roles[ar], b = target_->roles[br], c = target_->roles[cr];
+      auto descendant = [&](int child, int parent) {
+        for (int i = child; i >= 0; i = target_->bones[i].parent)
+          if (i == parent) return true;
+        return false;
+      };
+      if (a < 0 || b < 0 || c < 0 || !output.write[a] || !output.write[b] ||
+          !output.write[c] || !target_->bones[a].calibrated ||
+          !target_->bones[b].calibrated || !target_->bones[c].calibrated ||
+          !descendant(b, a) || !descendant(c, b)) {
+        output.sizingStatus[limb] = -1;
+        continue;
+      }
+      bool uniform = true;
+      for (int i = c; i >= 0; i = target_->bones[i].parent) {
+        Vec3 scale = target_->bones[i].localScale;
+        if (!std::isfinite(scale.x + scale.y + scale.z) || scale.x <= 0 ||
+            std::fabs(scale.x - scale.y) > scale.x * .001f ||
+            std::fabs(scale.x - scale.z) > scale.x * .001f) {uniform = false; break;}
+      }
+      if (!uniform) {output.sizingStatus[limb] = -1; continue;}
+      Vec3 pa = output.worldPos[a], pb = output.worldPos[b], pc = output.worldPos[c];
+      float upper = Len(pb - pa), lower = Len(pc - pb);
+      if (upper < 1e-5f || lower < 1e-5f) {output.sizingStatus[limb] = -1; continue;}
+      // An anatomical frame follows the torso/pelvis, independent of arbitrary
+      // Biped local axes or the character's world heading.
+      int root = target_->roles[0];
+      int anchor = target_->bones[a].parent;
+      Quat body = basis_;
+      if (anchor >= 0)
+        body = NormQ(output.worldRot[anchor] * Conj(target_->bones[anchor].restRot) * basis_);
+      else if (root >= 0)
+        body = NormQ(output.worldRot[root] * Conj(target_->bones[root].restRot) * basis_);
+      // MMD model coordinates are left/up/back; expose forward-positive offsets.
+      LimbCalibration local = s; local.offset.z *= -1;
+      Vec3 goal = CalibratedLimbGoal(pa, pb, pc, body, local);
+      Vec3 axis = Norm(pc - pa), bend = pb - pa;
+      bend = bend - axis * Dot(bend, axis);
+      if (Len(bend) < (upper + lower) * 1e-4f) {
+        // Straight limbs have no bend plane. Pick an anatomical plane, not a
+        // world-space axis, so turning the actor cannot flip knees or elbows.
+        bend = body * Vec3{0, 0, limb < 2 ? 1.f : -1.f};
+        bend = bend - axis * Dot(bend, axis);
+        if (Len(bend) < 1e-5f) bend = body * Vec3{(limb & 1) ? -1.f : 1.f, 0, 0};
+      }
+      Vec3 pole = pa + Norm(bend) * (upper + lower);
+      Quat endRotation = output.worldRot[c];
+      Vec3 solvedA = pa, solvedB = pb, solvedC = pc;
+      SolveTwoBone(solvedA, solvedB, solvedC, goal, pole, true);
+      output.sizingStatus[limb] = Len(solvedC - goal) > 2e-4f ? 2 : 1;
+      setWorld(a, NormQ(Quat::FromTo(pb - pa, solvedB - pa) * output.worldRot[a]));
+      setWorld(b, NormQ(Quat::FromTo(output.worldPos[c] - output.worldPos[b],
+                                   solvedC - solvedB) * output.worldRot[b]));
+      setWorld(c, endRotation);
+    }
+  }
+  void applyAmplitude(const MotionAmplitude &amplitude, const MotionCalibration &calibration) {
     bool changed = false;
+    const MotionAmplitude originalAmplitude;
+    const auto &effectiveAmplitude = calibration.enabled ? amplitude : originalAmplitude;
     for (size_t i = 0; i < target_->bones.size(); ++i) {
-      float factor = amplitude.factor(target_->bones[i].role);
+      const int role = target_->bones[i].role;
+      const float factor = calibration.factor(role) * effectiveAmplitude.factor(role);
       if (output.write[i] && factor != 1) {
         output.localRot[i] = ScaleMotionRotation(neutralLocal_[i], output.localRot[i], factor);
+        changed = true;
+      }
+      const Vec3 offset = calibration.offset(role);
+      if (output.write[i] && (offset.x != 0 || offset.y != 0 || offset.z != 0)) {
+        // Reapply a constant local angular offset to this fresh sample after
+        // IK and amplitude. Never feed the corrected previous frame back in.
+        output.localRot[i] = NormQ(output.localRot[i] * Quat::FromEulerDeg(offset));
         changed = true;
       }
     }
     // Helpers use the same sampled time and amplitude as the mapped limb.
     // Their side-branch rotations cannot move the elbow, hand or fingers.
-    changed=ApplyArmTwists(armTwists_,eval_.pose,*target_,amplitude,output)||changed;
+    changed=ApplyArmTwists(armTwists_,eval_.pose,*target_,effectiveAmplitude,output,calibration)||changed;
     if (changed) world();
   }
 
@@ -398,8 +489,8 @@ public:
       int i = target.roles[r];
       return i >= 0 ? target.bones[i].restPos : Vec3{};
     };
-    basis_ = NormQ(BodyBasis(tp(13), tp(14), tp(0), tp(10)) *
-                   Conj(BodyBasis(sp(13), sp(14), sp(0), sp(10))));
+    const Quat sourceBody=BodyBasis(sp(13), sp(14), sp(0), sp(10));
+    basis_ = NormQ(BodyBasis(tp(13), tp(14), tp(0), tp(10)) * Conj(sourceBody));
     nativeFingers_.fill(false);
     auto descendant = [](const auto &bones, int child, int ancestor) {
       if(child==ancestor)return false;
@@ -409,6 +500,33 @@ public:
     for(int side=0;side<2;++side) {
       const int hand=17+side;
       if(sourceRole_[hand]<0||target.roles[hand]<0||!target.bones[target.roles[hand]].calibrated)continue;
+      // Thumb rotations are authored relative to the source hand's rest
+      // orientation. Body axes alone can turn a closing Finger0 key into
+      // abduction when the source and target palms differ (e.g. A vs T pose).
+      // Transport the axes once through the two rest palms; keep the chosen
+      // native/PMX neutral and the full authored angle, including thumb roll.
+      Quat thumbBasis=basis_,sourcePalm,targetPalm;
+      const int index=27+side*15;
+      bool palm=true;
+      for(int role:{index,index+3,index+9}) {
+        const int si=geometryRoles[role],ti=target.roles[role];
+        palm=palm&&si>=0&&ti>=0&&target.bones[ti].calibrated&&
+            descendant(source.bones,si,sourceRole_[hand])&&
+            descendant(target.bones,ti,target.roles[hand]);
+      }
+      if(palm&&PalmBasis(sp(hand),sp(index+3),sp(index),sp(index+9),sourcePalm)&&
+          PalmBasis(tp(hand),tp(index+3),tp(index),tp(index+9),targetPalm)) {
+        // With a character PMX neutral, the default source must also use that
+        // PMX's rest hand axes. A generic A-pose palm plus PMX thumb directions
+        // is a hybrid rig: even correctly transported keys then bend wrongly.
+        // Explicit source PMX / T pose / remapped hand roles take precedence.
+        bool characterSource=source.builtin&&source.builtinPreset==BuiltinRigPreset::StandardMmd&&
+            target.thumbSourcePalmValid[side];
+        for(int role:{hand,index,index+3,index+9,24+side*15,25+side*15,26+side*15})
+          characterSource=characterSource&&roleBindings.find(role)==roleBindings.end();
+        if(characterSource)sourcePalm=target.thumbSourcePalm[side];
+        thumbBasis=NormQ(targetPalm*Conj(sourcePalm));
+      }
       // Each finger is independent: a missing pinky joint must not disable a
       // valid thumb, and a legacy two-joint thumb must not invent a third key.
       for(int finger=0;finger<5;++finger) {
@@ -420,7 +538,8 @@ public:
               descendant(source.bones,si,sourceRole_[parent])&&
               descendant(target.bones,ti,target.roles[parent]);
           nativeFingers_[role-24]=chain;
-          if(chain)fingerBasis_[role-24]=NormQ(Conj(target.bones[target.roles[parent]].restRot)*basis_);
+          if(chain)fingerBasis_[role-24]=NormQ(Conj(target.bones[target.roles[parent]].restRot)*
+              (finger==0?thumbBasis:basis_));
         }
       }
     }
@@ -512,14 +631,16 @@ public:
   }
   void sample(double frame, float scale, bool inPlace, float height,
               IkMode mode = IkMode::FollowMotion,
-              const MotionAmplitude &amplitude = {}) {
+              const MotionAmplitude &amplitude = {},
+              const MotionCalibration &calibration = {}) {
     eval_.sample(frame, mode);
     output.legIkActive = {false, false};
     output.rootOffset = {};
+    output.sizingStatus.fill(0);
     int hip = sourceRole_[0];
     if (hip >= 0 && affected_[0])
       output.rootOffset =
-          basis_ * (eval_.pose.positions[hip] - source_->bones[hip].rest) *
+          basis_ * CalibratedTravel(eval_.pose.positions[hip] - source_->bones[hip].rest, calibration) *
           scale;
     if (inPlace) {
       output.rootOffset.x = 0;
@@ -538,9 +659,10 @@ public:
         if (r>=24&&r<=53&&nativeFingers_[r-24]) {
           // Follow EIEM's native-parent bind-delta convention (ghost_rig.h,
           // DirectVmdEvaluateLocalPose / DirectVmdRetargetLocalRotation,
-          // 1bc9baa, AGPL-3.0). A palm frame inferred from finger positions
-          // rotates the motion axes again, even though neutral still matches.
-          // Use each joint's original parent frame, independently of A/T stance.
+          // 1bc9baa, AGPL-3.0). Each joint uses its own calibrated parent frame;
+          // thumb axes additionally account for the source/target rest palms.
+          // Remove the inherited source parent rotation before applying its
+          // independent key, so Finger0 is not applied again at Finger01/02.
           const int parentRole=(r-24)%3?r-1:hand;
           const Quat relative=NormQ(Conj(eval_.pose.rotations[sourceRole_[parentRole]])*
               eval_.pose.rotations[sourceRole_[r]]);
@@ -562,7 +684,7 @@ public:
       output.worldPos[i] = output.worldMatrix[i].position();
     }
     if (hip < 0) {
-      applyAmplitude(amplitude);
+      applyAmplitude(amplitude, calibration);
       return;
     }
     for (int side = 0; side < 2; side++) {
@@ -603,7 +725,8 @@ public:
                         output.worldRot[b]));
       setWorld(c, foot);
     }
-    applyAmplitude(amplitude);
+    applyMotionCalibration(calibration);
+    applyAmplitude(amplitude, calibration);
   }
 };
 } // namespace mmd
