@@ -35,6 +35,7 @@ static void RebuildCapturedCharacter();
 #include "game/secondary_body_runtime.h"
 #include "game/cloth_init.h"
 #include "config.h"
+#include "game/jelly_party.h"
 
 // 角色列表换编辑目标时，把该角色真正的 Entity 找回来（按 animator 反查当前小队）。
 // 布料增强要求 host 是 Beyond.Gameplay.Core.Entity；只有 Animator 时衣物准备会直接
@@ -323,6 +324,7 @@ static void GameFrameTickBody() {
     else if (mmdKeys & (1 << 1)) MmdPlaybackCommand(1);
     else if (mmdKeys & 1) MmdPlaybackCommand(0);
     MmdTick();
+    poser_jelly::Tick();
   } __except (1) {
     Log("[POSER] GameFrameTick SEH exception caught");
   }
@@ -452,6 +454,7 @@ static void DrawPoserGuiBody() {
       ImGui::TextDisabled("%s", mmd_camera::status.load());
       ImGui::Unindent();
     }
+    poser_jelly::Draw();
     // ---- 窗口开关集中在这里 ----
     // 勾上就出现对应窗口；窗口右上角的 × 也能关（两者是同一个状态）。
     if (ImGui::CollapsingHeader(u8"\u7a97\u53e3")) {
@@ -682,6 +685,7 @@ static void OnGuiShutdownRestore() {
   std::lock_guard<std::recursive_mutex> lock(g_poseMutex);
   RuntimeThreadScope runtime;
   if (!runtime.ready) return;
+  poser_jelly::Shutdown();
   mmd_camera::SetFixed(false);
   MmdStop();
   s_mmdClosing.store(true);

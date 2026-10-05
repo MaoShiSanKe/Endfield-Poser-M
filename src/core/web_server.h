@@ -13,6 +13,7 @@
 
 #include "nlohmann/json.hpp"
 #include "config.h"
+#include "core/http_request.h"
 #include "user_agreement.h"
 #include "game/skeleton.h"
 #include "game/freeze.h"
@@ -77,6 +78,13 @@ static void HandleRequestBody(SOCKET c, const std::string &path,
     char head[256];
     int n = snprintf(head, sizeof(head), "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", payload.size());
     send(c, head, n, 0); send(c, payload.data(), (int)payload.size(), 0); return;
+  }
+  if(path=="/api/jelly/status") {
+    size_t deviceTargets=0;for(const auto& t:poser_jelly::targets)if(t.device)++deviceTargets;
+    HttpJson(c,{{"device_targets",deviceTargets},{"device_scanned",poser_jelly::deviceScanned},{"active",poser_jelly::active},{"spinning",poser_jelly::spinActive},{"spin_speed",poser_jelly::spinSpeed},{"spin_direction",poser_jelly::spinDirection},{"targets",poser_jelly::targets.size()},
+      {"scanned",poser_jelly::scanned},{"restored",poser_jelly::restored},{"failed",poser_jelly::failed},
+      {"music_ready",bool(poser_jelly::audio.clip())},{"loading",poser_jelly::loading},{"status",poser_jelly::status}});
+    return;
   }
   const bool readOnly = path=="/" || path=="/index.html" || path=="/api/status" || path=="/api/mmd/status" || path=="/api/mmd/squad/status" || path=="/api/bones" || path=="/api/allbones" || path=="/api/face" || (path=="/api/pose" && body.empty());
   if(MmdOwnsPose() && !readOnly) {
@@ -606,30 +614,29 @@ static void HandleAttachedRequest(SOCKET c, const std::string &path, const std::
 }
 static void HandleClient(SOCKET c) {
   try {
+    poser_http::Request request;
     char buf[8192];
-    int n = recv(c, buf, sizeof(buf) - 1, 0);
-    if (n <= 0) {
-      closesocket(c);
-      return;
+    const ULONGLONG deadline = GetTickCount64() + 3000;
+    while (request.state == poser_http::Request::State::Waiting) {
+      const ULONGLONG now = GetTickCount64();
+      if (now >= deadline) { request.fail("Request timed out"); break; }
+      const DWORD remaining = static_cast<DWORD>(deadline - now);
+      setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&remaining), sizeof(remaining));
+      int n = recv(c, buf, sizeof(buf), 0);
+      if (n <= 0) { request.fail("Incomplete request"); break; }
+      request.append(buf, static_cast<size_t>(n));
     }
-    buf[n] = 0;
-    std::string req(buf);
-    std::string method, path, body;
-    size_t sp = req.find(' ');
-    if (sp != std::string::npos) {
-      method = req.substr(0, sp);
-      size_t sp2 = req.find(' ', sp + 1);
-      if (sp2 != std::string::npos)
-        path = req.substr(sp + 1, sp2 - sp - 1);
+    if (request.state != poser_http::Request::State::Complete) {
+      HttpJson(c, {{"ok", false}, {"err", request.error}});
+    } else if (!request.body.empty() && request.path.rfind("/api/", 0) == 0 &&
+               !nlohmann::json::parse(request.body, nullptr, false).is_object()) {
+      HttpJson(c, {{"ok", false}, {"err", "Expected a JSON object"}});
+    } else {
+      HandleAttachedRequest(c, request.path, request.body);
     }
-    size_t hb = req.find("\r\n\r\n");
-    if (hb != std::string::npos)
-      body = req.substr(hb + 4);
-    if (path.empty())
-      path = "/";
-    HandleAttachedRequest(c, path, body);
   } catch (...) {
     Log("[WEB] C++ exception in handler");
+    HttpJson(c, {{"ok", false}, {"err", "Request handler failed"}});
   }
   closesocket(c);
 }

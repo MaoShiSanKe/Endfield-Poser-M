@@ -101,6 +101,9 @@ if(WIN32)
     src/cloth/diagnostics/cloth_shoulder_trace.h
     src/cloth/native/cloth_native_runtime.h
     src/cloth/shoulder/cloth_shoulder_drive.h
+    src/game/jelly_party.h
+    src/math/jelly_party.h
+    src/core/http_request.h
     src/core/web_server.h
     src/editor/panel_mmd_squad.h
     src/game/mmd_avatar.h
@@ -216,7 +219,7 @@ if(POSER_BUILD_TESTS)
   file(GLOB POSER_TEST_SOURCES CONFIGURE_DEPENDS tests/test_*.cpp)
   foreach(test_source IN LISTS POSER_TEST_SOURCES)
     get_filename_component(test_name "${test_source}" NAME_WE)
-    if(NOT WIN32 AND NOT test_name MATCHES "^test_(quat|ik|pose_file|mmd|mmd_camera|mmd_transport|character_faces|face_mixing|eye_gaze|edit_selection)$")
+    if(NOT WIN32 AND NOT test_name MATCHES "^test_(quat|ik|pose_file|http_request|jelly_party|mmd|mmd_camera|mmd_transport|character_faces|face_mixing|eye_gaze|edit_selection)$")
       continue()
     endif()
     add_executable(${test_name} "${test_source}")
